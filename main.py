@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 from pydantic import BaseModel
 from typing import List, Optional
 import tensorflow as tf
@@ -168,3 +169,11 @@ def delete_models(model_paths: List[str] = Body(...)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    # Configuración del servidor
+    host = "0.0.0.0"  # Esto permite conexiones desde cualquier IP
+    port = 8000       # Puerto estándar para FastAPI
+    
+    print(f"Iniciando servidor en http://{host}:{port}")
+    uvicorn.run(app, host=host, port=port)
