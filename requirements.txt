@@ -1,0 +1,6 @@
+fastapi>=0.68.0
+uvicorn>=0.15.0
+pydantic>=1.8.0
+tensorflow>=2.0.0
+keras>=2.0.0
+python-multipart>=0.0.5
