@@ -1,0 +1,47 @@
+# Archivos y directorios específicos de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.env
+.venv
+python-env/
+
+# Archivos de distribución/empaquetado
+dist/
+build/
+*.egg-info/
+
+# Archivos de caché de pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Archivos de Jupyter Notebook
+.ipynb_checkpoints
+
+# Archivos específicos de IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Archivos de sistema operativo
+.DS_Store
+Thumbs.db
+
+# Directorios específicos del proyecto que NO deben subirse
+models/
+Train_MNIST_32x32_grayScale/
+
+# Logs
+logs/
+*.log
+
+# Archivos temporales
+tmp/
+temp/
