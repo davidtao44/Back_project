@@ -18,3 +18,10 @@ class CNNConfig(BaseModel):
     output_units: int
     output_activation: str
     model_name: Optional[str] = "model"  # Campo para recibir el nombre desde el frontend
+
+# Nuevo modelo para la conversión de imágenes a VHDL
+class ImageToVHDLRequest(BaseModel):
+    image_data: str  # Datos de imagen en base64
+    output_format: str = "hex"  # Formato de salida: "hex" o "decimal"
+    width: int = 32  # Ancho de la imagen redimensionada
+    height: int = 32  # Alto de la imagen redimensionada

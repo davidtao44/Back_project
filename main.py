@@ -5,10 +5,17 @@ from typing import List
 import tensorflow as tf
 import os
 import time
+import base64
+import io
+from PIL import Image
+import numpy as np
 
 # Importar desde nuestros módulos
-from models import CNNConfig
+from models import CNNConfig, ImageToVHDLRequest
 from utils import create_cnn, generate_model_filename
+
+# Importar la función de cuantización
+from model_quantization import modify_and_save_weights
 
 app = FastAPI()
 
@@ -121,6 +128,161 @@ def delete_models(model_paths: List[str] = Body(...)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/quantize_model/")
+def quantize_model(model_path: str = Body(...), multiplication_factor: int = Body(100)):
+    try:
+        if not os.path.exists(model_path):
+            raise HTTPException(status_code=404, detail=f"Modelo no encontrado: {os.path.basename(model_path)}")
+        
+        # Generar nombre para el modelo cuantizado
+        base_name = os.path.basename(model_path)
+        name_parts = os.path.splitext(base_name)
+        quantized_filename = f"{name_parts[0]}_quantized_{multiplication_factor}{name_parts[1]}"
+        save_path = os.path.join("models", quantized_filename)
+        
+        # Cuantizar el modelo
+        result_path = modify_and_save_weights(model_path, save_path, multiplication_factor)
+        
+        return {
+            "success": True,
+            "message": f"Modelo cuantizado con factor {multiplication_factor} exitosamente",
+            "original_model": os.path.basename(model_path),
+            "quantized_model": os.path.basename(result_path),
+            "quantized_model_path": result_path
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/convert_image_to_vhdl/")
+async def convert_image_to_vhdl(request: ImageToVHDLRequest):
+    try:
+        # Decodificar la imagen desde base64
+        image_data = request.image_data
+        if "," in image_data:
+            # Eliminar el prefijo de datos URI si existe
+            image_data = image_data.split(",")[1]
+        
+        # Decodificar base64 a bytes
+        image_bytes = base64.b64decode(image_data)
+        
+        # Abrir la imagen con PIL
+        img = Image.open(io.BytesIO(image_bytes))
+        
+        # Redimensionar la imagen
+        img = img.resize((request.width, request.height))
+        
+        # Convertir a escala de grises
+        img = img.convert('L')
+        
+        # Convertir a matriz numpy
+        pixel_matrix = np.array(img)
+        
+        # Preparar matrices de salida
+        decimal_matrix = pixel_matrix.tolist()
+        hex_matrix = []
+        vhdl_matrix = []
+        
+        # Convertir a hexadecimal y formato VHDL
+        for row in decimal_matrix:
+            hex_row = []
+            vhdl_row = []
+            for pixel in row:
+                hex_value = format(pixel, '02x')
+                hex_row.append(hex_value)
+                vhdl_row.append(f'x"{hex_value}"')
+            hex_matrix.append(hex_row)
+            vhdl_matrix.append(vhdl_row)
+        
+        # Generar código VHDL
+        vhdl_code = generate_vhdl_code(vhdl_matrix, request.width, request.height)
+        
+        # Guardar el código VHDL en un archivo de texto con la estructura de Memoria_Imagen.vhd
+        output_path = "c:/Users/PC/Documents/UNIVERSIDAD/Project/Back_project/Memoria_Imagen.vhdl.txt"
+        with open(output_path, "w") as f:
+            f.write(vhdl_code)
+        
+        return {
+            "success": True,
+            "decimal_matrix": decimal_matrix,
+            "hex_matrix": hex_matrix,
+            "vhdl_code": vhdl_code,
+            "file_path": output_path
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+def generate_vhdl_code(vhdl_matrix, width, height):
+    # Generar el código VHDL con la estructura de Memoria_Imagen.vhd
+    vhdl_code = [
+        "library ieee; ",
+        "use ieee.std_logic_1164.all; ",
+        "use ieee.numeric_std.all; ",
+        "",
+        "entity Memoria_Imagen is",
+        "",
+        "	generic (",
+        "		data_width  : natural := 8; ",
+        "	   addr_length : natural := 10	-- 1024 pos mem",
+        "		); ",
+        "	",
+        "	port ( ",
+        "		clk      :  in std_logic;",
+        "--		rst : in std_logic;",
+        "		address  :  in std_logic_vector(addr_length-1 downto 0); ",
+        "		data_out :  out std_logic_vector(data_width-1  downto 0) ",
+        "		);",
+        "		",
+        "end Memoria_Imagen;",
+        "",
+        "",
+        "architecture synth of Memoria_Imagen is",
+        "",
+        "	constant mem_size : natural := 2**addr_length; 	",
+        "	type mem_type is array (0 to mem_size-1) of std_logic_vector (data_width-1 downto 0); ",
+        "",
+        "constant mem : mem_type := ("
+    ]
+    
+    # Formatear la matriz de píxeles en el formato de Memoria_Imagen.vhd
+    # Aplanar la matriz 2D en una matriz 1D para el formato de Memoria_Imagen.vhd
+    flat_matrix = []
+    for row in vhdl_matrix:
+        flat_matrix.extend(row)
+    
+    # Agregar los valores en grupos de 32 por línea
+    for i in range(0, len(flat_matrix), 32):
+        chunk = flat_matrix[i:i+32]
+        line = "\t\t" + ", ".join(chunk)
+        if i + 32 < len(flat_matrix):
+            line += ","
+        vhdl_code.append(line)
+    
+    # Cerrar la definición de la matriz y agregar el resto del código
+    vhdl_code.extend([
+        "	);",
+        "",
+        "	",
+        "begin ",
+        "",
+        "	rom : process (clk) ",
+        "	begin",
+        "	   ",
+        "----	   if (rising_edge(Clk)) then",
+        "--		  if rst = '1' then",
+        "--				-- Reset the counter to 0",
+        "--				data_out <= ((others=> '0'));",
+        "--		  end if;",
+        "	   ",
+        "		if rising_edge(clk) then ",
+        "			data_out <= mem(to_integer(unsigned(address))); ",
+        "		end if; ",
+        "	end process rom; ",
+        "",
+        "end architecture synth;"
+    ])
+    
+    return "\n".join(vhdl_code)
 
 if __name__ == "__main__":
     # Configuración del servidor
