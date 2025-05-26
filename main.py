@@ -1,12 +1,14 @@
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
 import tensorflow as tf
-from keras import layers, models
 import os
 import time
+
+# Importar desde nuestros módulos
+from models import CNNConfig
+from utils import create_cnn, generate_model_filename
 
 app = FastAPI()
 
@@ -19,40 +21,16 @@ app.add_middleware(
     allow_headers=["*"],  # Permitir todos los encabezados
 )
 
-class ConvLayer(BaseModel):
-    filters: int
-    kernel_size: int
-    activation: str = "relu"
-    pooling: Optional[str] = None  # "max" o "average"
-
-class DenseLayer(BaseModel):
-    units: int
-    activation: str
-
-class CNNConfig(BaseModel):
-    input_shape: List[int]
-    conv_layers: List[ConvLayer]
-    dense_layers: List[DenseLayer]
-    output_units: int
-    output_activation: str
-    model_name: Optional[str] = "model"  # Add this field to receive the name from frontend
-
 @app.post("/create_cnn/")
 def create_cnn_endpoint(config: CNNConfig):
     try:
         model = create_cnn(config)
-        model.summary() #para corroborar la arquitectura del modelo
+        model.summary() # para corroborar la arquitectura del modelo
         
-        # Format the date as DD_MM_YYYY
-        current_date = time.strftime('%d_%m_%Y', time.localtime())
+        # Generar nombre de archivo para el modelo
+        model_filename = generate_model_filename(config.model_name)
         
-        # Use the user-provided name or default to "model"
-        user_name = config.model_name.replace(" ", "_")  # Replace spaces with underscores
-        
-        # Create filename with the format DD_MM_YYYY_userName
-        model_filename = f"models/architecture_{current_date}_{user_name}.h5"
-        
-        # Save the model to disk
+        # Guardar el modelo en disco
         model.save(model_filename)
         
         return {
@@ -63,35 +41,10 @@ def create_cnn_endpoint(config: CNNConfig):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-def create_cnn(config: CNNConfig):
-    model = models.Sequential()
-    model.add(layers.InputLayer(input_shape=tuple(config.input_shape)))
-    
-    for layer in config.conv_layers:
-        model.add(layers.Conv2D(layer.filters, (layer.kernel_size, layer.kernel_size), activation=layer.activation))
-        if layer.pooling:
-            if layer.pooling == "max":
-                model.add(layers.MaxPooling2D((2, 2)))
-            elif layer.pooling == "average":
-                model.add(layers.AveragePooling2D((2, 2)))
-    
-    model.add(layers.Flatten())
-    
-    for layer in config.dense_layers:
-        model.add(layers.Dense(layer.units, activation=layer.activation))
-    
-    model.add(layers.Dense(config.output_units, activation=config.output_activation))
-    return model
-
-# Create a directory for saving models if it doesn't exist
-os.makedirs("models", exist_ok=True)
-
-#Para probar que este en curso 
 @app.get("/")
 def read_root():
     return {"message": "¡FastAPI está corriendo!"}
 
-# Add this new endpoint to list all saved models
 @app.get("/list_models/")
 def list_models():
     try:
@@ -104,14 +57,14 @@ def list_models():
         
         for model_file in model_files:
             model_path = os.path.join(models_dir, model_file)
-            # Get file creation time and size
+            # Obtener tiempo de creación y tamaño
             creation_time = os.path.getctime(model_path)
             size_kb = os.path.getsize(model_path) / 1024
             
-            # Load model to get summary info
+            # Cargar modelo para obtener información de resumen
             try:
                 model = tf.keras.models.load_model(model_path)
-                # Get layer information
+                # Obtener información de capas
                 layers_info = []
                 for layer in model.layers:
                     layer_info = {
@@ -132,7 +85,7 @@ def list_models():
                     "layers": layers_info
                 })
             except Exception as e:
-                # If there's an error loading the model, still include basic info
+                # Si hay un error al cargar el modelo, incluir información básica
                 models_info.append({
                     "filename": model_file,
                     "path": model_path,
@@ -145,7 +98,6 @@ def list_models():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Add a new endpoint to delete models
 @app.post("/delete_models/")
 def delete_models(model_paths: List[str] = Body(...)):
     try:
