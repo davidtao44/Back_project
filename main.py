@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel  # Añadir esta línea
 import uvicorn
 from typing import List
 import tensorflow as tf
@@ -16,6 +17,9 @@ from utils import create_cnn, generate_model_filename
 
 # Importar la función de cuantización
 from model_quantization import modify_and_save_weights
+
+# Importar bibliotecas adicionales si no están ya importadas
+import keras
 
 app = FastAPI()
 
@@ -283,6 +287,145 @@ def generate_vhdl_code(vhdl_matrix, width, height):
     ])
     
     return "\n".join(vhdl_code)
+
+def to_binary_c2(value, bits=8):
+    """Convierte un valor a binario en complemento a 2."""
+    if value < 0:
+        value = (1 << bits) + value
+    return format(value, f'0{bits}b')
+
+def extract_filters(model, output_dir, bits_value=8):
+    """Extrae los filtros y sesgos de cada capa convolucional y los guarda en archivos .txt."""
+    # Crear el directorio de salida si no existe
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    filter_files = []
+    
+    for i, layer in enumerate(model.layers):
+        if isinstance(layer, tf.keras.layers.Conv2D):
+            filters, biases = layer.get_weights()
+            num_filters = filters.shape[-1]  # Número de filtros
+            num_channels = filters.shape[-2]  # Número de canales de entrada
+
+            # Crear un archivo de texto para la capa actual
+            layer_filename = os.path.join(output_dir, f"layer_{i+1}_filters.txt")
+            filter_files.append(os.path.basename(layer_filename))
+            
+            with open(layer_filename, "w") as file:
+                # Escribir los filtros en el archivo
+                file.write(f"Filtros de la capa convolucional {i+1}:\n")
+                for j in range(num_filters):  # Recorrer cada filtro
+                    for c in range(num_channels):  # Recorrer cada canal
+                        filter_matrix = filters[:, :, c, j]  # Obtener el filtro para el canal c
+                        file.write(f"constant FMAP_{c+1}_{j+1}: FILTER_TYPE:= (\n")
+                        for k in range(filter_matrix.shape[0]):  # Filas del filtro
+                            row = ["\"" + to_binary_c2(int(filter_matrix[k, l]), bits=bits_value) + "\"" 
+                                   for l in range(filter_matrix.shape[1])]
+                            file.write("    (" + ",".join(row) + ")" + ("," if k < filter_matrix.shape[0] - 1 else "") + "\n")
+                        file.write(");\n\n")
+
+                # Escribir los sesgos en el archivo
+                file.write(f"Sesgos de la capa convolucional {i+1}:\n")
+                for idx, bias in enumerate(biases):
+                    bias_bin = to_binary_c2(int(bias), bits=bits_value)  # Mantener 24 bits para sesgos o usar bits_value
+                    file.write(f"constant BIAS_VAL_{idx+1}: signed (BIASES_SIZE-1 downto 0) := \"{bias_bin}\";\n")
+                file.write("\n")
+    
+    return filter_files
+
+def extract_dense_layers(model, output_dir, bits_value=8):
+    """Extrae los pesos y sesgos de las capas densas y los guarda en archivos .txt."""
+    # Crear el directorio de salida si no existe
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    dense_files = []
+    
+    for layer in model.layers:
+        if isinstance(layer, tf.keras.layers.Dense):
+            pesos = layer.get_weights()[0]  # Pesos
+            biases = layer.get_weights()[1]  # Biases
+
+            num_filas, num_columnas = pesos.shape  # (Entradas, Neuronas)
+
+            # Guardar pesos en formato VHDL (recorriendo por columnas)
+            pesos_filename = os.path.join(output_dir, f"{layer.name}_pesos.txt")
+            dense_files.append(os.path.basename(pesos_filename))
+            
+            with open(pesos_filename, "w") as f_pesos:
+                for j in range(num_columnas):  # Recorrer por columnas primero
+                    for i in range(num_filas):  # Luego recorrer filas
+                        bin_value = to_binary_c2(int(pesos[i, j]), bits=bits_value)  # Usar bits_value
+                        f_pesos.write(f'constant FMAP_{j+1}_{i+1}: signed(WEIGHT_SIZE-1 downto 0) := "{bin_value}";\n')
+
+            # Guardar biases en formato VHDL
+            biases_filename = os.path.join(output_dir, f"{layer.name}_biases.txt")
+            dense_files.append(os.path.basename(biases_filename))
+            
+            with open(biases_filename, "w") as f_biases:
+                for i, bias in enumerate(biases, start=1):  # Iniciar en 1
+                    bin_value = to_binary_c2(int(bias), bits=bits_value)  # Usar bits_value
+                    f_biases.write(f'constant BIAS_VAL_{i}: signed(BIASES_SIZE-1 downto 0) := "{bin_value}";\n')
+    
+    return dense_files
+
+# Crear un nuevo modelo para la solicitud de extracción de pesos
+class ModelWeightsRequest(BaseModel):
+    model_path: str
+    output_dir: str = "model_weights"
+    bits_value: int = 8  # Valor predeterminado de 8 bits
+
+# Endpoint para extraer pesos y sesgos del modelo
+@app.post("/extract_model_weights/")
+def extract_model_weights(request: ModelWeightsRequest):
+    try:
+        if not os.path.exists(request.model_path):
+            raise HTTPException(status_code=404, detail=f"Modelo no encontrado: {os.path.basename(request.model_path)}")
+        
+        # Crear directorio de salida
+        output_dir = request.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Cargar el modelo
+        model = keras.models.load_model(request.model_path)
+        
+        # Establecer el valor de bits para la conversión
+        bits_value = request.bits_value
+        
+        # Extraer filtros y sesgos de capas convolucionales
+        conv_files = extract_filters(model, output_dir, bits_value)
+        
+        # Extraer pesos y sesgos de capas densas
+        dense_files = extract_dense_layers(model, output_dir, bits_value)
+        
+        # Combinar todos los archivos generados
+        generated_files = conv_files + dense_files
+        
+        return {
+            "success": True,
+            "message": f"Pesos y sesgos extraídos exitosamente con {bits_value} bits",
+            "model": os.path.basename(request.model_path),
+            "output_dir": output_dir,
+            "files": generated_files
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Endpoint para descargar archivos generados
+@app.get("/download_file/")
+def download_file(file_path: str):
+    try:
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"Archivo no encontrado: {os.path.basename(file_path)}")
+        
+        # Leer el contenido del archivo
+        with open(file_path, "r") as f:
+            content = f.read()
+        
+        return {"content": content, "filename": os.path.basename(file_path)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     # Configuración del servidor
