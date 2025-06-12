@@ -202,7 +202,7 @@ async def convert_image_to_vhdl(request: ImageToVHDLRequest):
         vhdl_code = generate_vhdl_code(vhdl_matrix, request.width, request.height)
         
         # Guardar el código VHDL en un archivo de texto con la estructura de Memoria_Imagen.vhd
-        #output_path = "c:/Users/PC/Documents/UNIVERSIDAD/Project/Back_project/Memoria_Imagen.vhdl.txt"
+        output_path = "c:/Users/PC/Documents/UNIVERSIDAD/Project/Back_project/Memoria_Imagen.vhdl.txt"
         with open(output_path, "w") as f:
             f.write(vhdl_code)
         
