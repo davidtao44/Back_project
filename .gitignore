@@ -35,7 +35,7 @@ htmlcov/
 Thumbs.db
 
 # Directorios específicos del proyecto que NO deben subirse
-models/
+
 Train_MNIST_32x32_grayScale/
 
 # Logs
