@@ -45,8 +45,8 @@ def modify_and_save_weights(model_path, save_path, multiplication_factor=100):
     return save_path
 
 
-model_path = r'C:\Users\PC\Documents\UNIVERSIDAD\Proyecto_g\Scripts_pruebas\lenet_model.h5'
-save_path = r'C:\Users\PC\Documents\UNIVERSIDAD\Proyecto_g\Scripts_pruebas\lenet_model_cuantizado.h5'
+# model_path = r'C:\Users\PC\Documents\UNIVERSIDAD\Proyecto_g\Scripts_pruebas\lenet_model.h5'
+# save_path = r'C:\Users\PC\Documents\UNIVERSIDAD\Proyecto_g\Scripts_pruebas\lenet_model_cuantizado.h5'
 
-modify_and_save_weights(model_path, save_path)
+# modify_and_save_weights(model_path, save_path)
 
