@@ -54,7 +54,9 @@ def extract_filters(model, output_dir="output_filters"):
 
 
 # Ruta al archivo .h5
-h5_file = "C:/Users/PC/Documents/UNIVERSIDAD/Proyecto_g/Proyecto/Obtención_VHDL/Back/lenet_model_cuantizado.h5"
+# h5_file = "C:/Users/PC/Documents/UNIVERSIDAD/Proyecto_g/Proyecto/Obtención_VHDL/Back/lenet_model_cuantizado.h5"
+h5_file = os.path.join(os.path.dirname(__file__), 'models', 'lenet_model_cuantizado.h5')
+
 
 # Cargar el modelo
 modelo = keras.models.load_model(h5_file)
