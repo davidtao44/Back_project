@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel  # Añadir esta línea
 import uvicorn
@@ -10,6 +10,7 @@ import base64
 import io
 from PIL import Image
 import numpy as np
+from datetime import timedelta
 
 # Importar desde nuestros módulos
 from models import CNNConfig, ImageToVHDLRequest
@@ -20,6 +21,12 @@ from model_quantization import modify_and_save_weights
 
 # Importar bibliotecas adicionales si no están ya importadas
 import keras
+
+# Importar módulos de autenticación
+from auth import (
+    UserCreate, UserLogin, Token, authenticate_user, create_access_token,
+    get_current_user, create_user, ACCESS_TOKEN_EXPIRE_MINUTES
+)
 
 app = FastAPI()
 
@@ -33,7 +40,7 @@ app.add_middleware(
 )
 
 @app.post("/create_cnn/")
-def create_cnn_endpoint(config: CNNConfig):
+def create_cnn_endpoint(config: CNNConfig, current_user: dict = Depends(get_current_user)):
     try:
         model = create_cnn(config)
         model.summary() # para corroborar la arquitectura del modelo
@@ -55,6 +62,67 @@ def create_cnn_endpoint(config: CNNConfig):
 @app.get("/")
 def read_root():
     return {"message": "¡FastAPI está corriendo!"}
+
+# Endpoints de autenticación
+@app.post("/auth/register", response_model=dict)
+def register(user: UserCreate):
+    """Registrar nuevo usuario"""
+    try:
+        new_user = create_user(user)
+        return {
+            "success": True,
+            "message": "Usuario creado exitosamente",
+            "user": new_user
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/auth/login", response_model=Token)
+def login(user_credentials: UserLogin):
+    """Iniciar sesión"""
+    user = authenticate_user(user_credentials.username, user_credentials.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Credenciales incorrectas",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user["username"]}, expires_delta=access_token_expires
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "username": user["username"],
+            "email": user["email"],
+            "is_active": user["is_active"]
+        }
+    }
+
+@app.get("/auth/me")
+def get_current_user_info(current_user: dict = Depends(get_current_user)):
+    """Obtener información del usuario actual"""
+    return {
+        "username": current_user["username"],
+        "email": current_user["email"],
+        "is_active": current_user["is_active"]
+    }
+
+@app.post("/auth/verify-token")
+def verify_token_endpoint(current_user: dict = Depends(get_current_user)):
+    """Verificar si el token es válido"""
+    return {
+        "valid": True,
+        "user": {
+            "username": current_user["username"],
+            "email": current_user["email"],
+            "is_active": current_user["is_active"]
+        }
+    }
 
 @app.get("/list_models/")
 def list_models():
@@ -110,7 +178,7 @@ def list_models():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/delete_models/")
-def delete_models(model_paths: List[str] = Body(...)):
+def delete_models(model_paths: List[str] = Body(...), current_user: dict = Depends(get_current_user)):
     try:
         deleted_models = []
         errors = []
@@ -134,7 +202,7 @@ def delete_models(model_paths: List[str] = Body(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/quantize_model/")
-def quantize_model(model_path: str = Body(...), multiplication_factor: int = Body(100)):
+def quantize_model(model_path: str = Body(...), multiplication_factor: int = Body(100), current_user: dict = Depends(get_current_user)):
     try:
         if not os.path.exists(model_path):
             raise HTTPException(status_code=404, detail=f"Modelo no encontrado: {os.path.basename(model_path)}")
@@ -431,7 +499,7 @@ def download_file(file_path: str):
 if __name__ == "__main__":
     # Configuración del servidor
     host = "0.0.0.0"  # Esto permite conexiones desde cualquier IP
-    port = 8000       # Puerto estándar para FastAPI
+    port = int(os.getenv("PORT", 8000))  # Usar variable de entorno PORT para despliegue en la nube
     
     print(f"Iniciando servidor en http://{host}:{port}")
     uvicorn.run(app, host=host, port=port)

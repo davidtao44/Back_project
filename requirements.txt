@@ -4,4 +4,7 @@ tensorflow
 pydantic
 pillow
 numpy
-python-multipart 
+python-multipart
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
