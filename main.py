@@ -25,10 +25,23 @@ import keras
 # Importar módulos de autenticación
 from auth import (
     UserCreate, UserLogin, Token, authenticate_user, create_access_token,
-    get_current_user, create_user, ACCESS_TOKEN_EXPIRE_MINUTES
+    get_current_user, create_user, ACCESS_TOKEN_EXPIRE_MINUTES,
+    initialize_default_users
 )
 
+# Importar configuración de Firebase
+from firebase_config import initialize_firestore
+
 app = FastAPI()
+
+# Inicializar Firestore y usuarios por defecto
+try:
+    initialize_firestore()
+    initialize_default_users()
+    print("✅ Firestore inicializado correctamente")
+except Exception as e:
+    print(f"⚠️ Advertencia: No se pudo inicializar Firestore: {str(e)}")
+    print("   Asegúrate de tener el archivo de credenciales de Firebase")
 
 # Configurar CORS para permitir peticiones desde el frontend
 app.add_middleware(

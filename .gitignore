@@ -18,6 +18,12 @@ build/
 
 # Archivos de caché de pytest
 .pytest_cache/
+
+# Credenciales de Firebase (NUNCA subir al repositorio)
+firebase-credentials.json
+serviceAccountKey.json
+firebase-service-account.json
+*.json
 .coverage
 htmlcov/
 
