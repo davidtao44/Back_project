@@ -29,6 +29,12 @@ from auth import (
     initialize_default_users
 )
 
+# Importar autenticación con Google
+from google_auth import (
+    GoogleAuthRequest, authenticate_with_google, logout_user,
+    get_current_user as get_current_google_user
+)
+
 # Importar configuración de Firebase
 from firebase_config import initialize_firestore
 
@@ -120,9 +126,57 @@ def login(user_credentials: UserLogin):
 def get_current_user_info(current_user: dict = Depends(get_current_user)):
     """Obtener información del usuario actual"""
     return {
-        "username": current_user["username"],
-        "email": current_user["email"],
-        "is_active": current_user["is_active"]
+        "username": current_user.get("username"),
+        "email": current_user.get("email"),
+        "is_active": current_user.get("is_active", True)
+    }
+
+@app.post("/auth/google", response_model=dict)
+def google_login(google_auth_request: GoogleAuthRequest):
+    """Autenticación con Google"""
+    try:
+        result = authenticate_with_google(google_auth_request)
+        return {
+            "success": True,
+            "message": "Autenticación con Google exitosa",
+            "data": result
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error en autenticación con Google: {str(e)}"
+        )
+
+@app.post("/auth/google/logout")
+def google_logout(current_user: dict = Depends(get_current_google_user)):
+    """Cerrar sesión de Google"""
+    try:
+        result = logout_user(current_user)
+        return {
+            "success": True,
+            "message": "Sesión cerrada exitosamente",
+            "data": result
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al cerrar sesión: {str(e)}"
+        )
+
+@app.get("/auth/google/me")
+def get_current_google_user_info(current_user: dict = Depends(get_current_google_user)):
+    """Obtener información del usuario actual autenticado con Google"""
+    return {
+        "uid": current_user.get("uid"),
+        "email": current_user.get("email"),
+        "name": current_user.get("name"),
+        "picture": current_user.get("picture"),
+        "provider": current_user.get("provider"),
+        "is_active": current_user.get("is_active", True)
     }
 
 @app.post("/auth/verify-token")

@@ -1,5 +1,5 @@
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, auth
 import os
 import json
 
@@ -32,7 +32,7 @@ def initialize_firestore():
         
         # Obtener cliente de Firestore
         db = firestore.client()
-        print(f"✅ Firestore inicializado correctamente usando {credential_path}")
+        print(f"✅ Firestore y Firebase Auth inicializados correctamente usando {credential_path}")
         return db
         
     except Exception as e:

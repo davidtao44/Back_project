@@ -10,3 +10,6 @@ passlib[bcrypt]
 python-multipart
 firebase-admin
 google-cloud-firestore
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
