@@ -1,11 +1,12 @@
-fastapi==0.68.0
-uvicorn==0.15.0
-tensorflow==2.6.2
-pydantic==1.8.2
+fastapi
+uvicorn
+tensorflow 
+pydantic
 pillow
 numpy
 python-multipart
 python-jose[cryptography]
 passlib[bcrypt]
+python-multipart
 firebase-admin
 google-cloud-firestore
