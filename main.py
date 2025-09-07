@@ -182,13 +182,29 @@ def get_current_google_user_info(current_user: dict = Depends(get_current_google
 @app.post("/auth/verify-token")
 def verify_token_endpoint(current_user: dict = Depends(get_current_user)):
     """Verificar si el token es válido"""
+    # Manejar tanto usuarios normales como usuarios de Google
+    user_data = {
+        "email": current_user.get("email"),
+        "is_active": current_user.get("is_active", True)
+    }
+    
+    # Para usuarios normales (tienen username)
+    if "username" in current_user:
+        user_data["username"] = current_user["username"]
+    
+    # Para usuarios de Google (tienen name, picture, etc.)
+    if "name" in current_user:
+        user_data["displayName"] = current_user["name"]
+    
+    if "picture" in current_user:
+        user_data["photoURL"] = current_user["picture"]
+    
+    if "provider" in current_user:
+        user_data["provider"] = current_user["provider"]
+    
     return {
         "valid": True,
-        "user": {
-            "username": current_user["username"],
-            "email": current_user["email"],
-            "is_active": current_user["is_active"]
-        }
+        "user": user_data
     }
 
 @app.get("/list_models/")
