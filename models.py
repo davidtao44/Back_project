@@ -25,3 +25,10 @@ class ImageToVHDLRequest(BaseModel):
     output_format: str = "hex"  # Formato de salida: "hex" o "decimal"
     width: int = 32  # Ancho de la imagen redimensionada
     height: int = 32  # Alto de la imagen redimensionada
+
+# Modelo para las solicitudes de FaultInjector
+class FaultInjectorRequest(BaseModel):
+    model_path: str  # Ruta del modelo a usar
+    image_data: Optional[str] = None  # Datos de imagen en base64 (opcional)
+    fault_type: Optional[str] = None  # Tipo de fallo a inyectar (opcional)
+    fault_parameters: Optional[dict] = None  # Parámetros específicos del fallo (opcional)

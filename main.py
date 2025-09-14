@@ -14,7 +14,7 @@ from datetime import timedelta
 import shutil
 
 # Importar desde nuestros módulos
-from models import ImageToVHDLRequest
+from models import ImageToVHDLRequest, FaultInjectorRequest
 
 # Importar la función de cuantización
 from model_quantization import modify_and_save_weights
@@ -625,10 +625,65 @@ def download_file(file_path: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/fault_injector/inference/")
+async def fault_injector_inference(file: UploadFile = File(...), model_path: str = Body(...), current_user: dict = Depends(get_current_user)):
+    """
+    Endpoint para realizar inferencia con FaultInjector
+    """
+    try:
+        # Validar que el archivo sea una imagen
+        if not file.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="El archivo debe ser una imagen")
+        
+        # Leer y procesar la imagen
+        image_data = await file.read()
+        image = Image.open(io.BytesIO(image_data))
+        
+        # Convertir a escala de grises para LeNet-5 (espera 1 canal)
+        if image.mode != 'L':
+            image = image.convert('L')
+        
+        # Redimensionar a 32x32 para compatibilidad con LeNet-5
+        image = image.resize((32, 32))
+        
+        # Convertir a array numpy y normalizar
+        image_array = np.array(image) / 255.0
+        image_array = np.expand_dims(image_array, axis=0)  # Añadir dimensión batch
+        image_array = np.expand_dims(image_array, axis=-1)  # Añadir dimensión de canal
+        
+        # Cargar el modelo
+        if not os.path.exists(model_path):
+            raise HTTPException(status_code=404, detail="Modelo no encontrado")
+        
+        model = tf.keras.models.load_model(model_path)
+        
+        # Realizar predicción
+        predictions = model.predict(image_array)
+        
+        # Obtener la clase predicha y la confianza
+        predicted_class = int(np.argmax(predictions[0]))
+        confidence = float(np.max(predictions[0]))
+        
+        # Obtener todas las probabilidades
+        all_probabilities = predictions[0].tolist()
+        
+        return {
+            "success": True,
+            "predicted_class": predicted_class,
+            "confidence": confidence,
+            "all_probabilities": all_probabilities,
+            "model_used": os.path.basename(model_path),
+            "image_shape": image_array.shape[1:],
+            "message": "Inferencia completada exitosamente"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en la inferencia: {str(e)}")
+
 if __name__ == "__main__":
     # Configuración del servidor
     host = "0.0.0.0"  # Esto permite conexiones desde cualquier IP
     port = int(os.getenv("PORT", 8000))  # Usar variable de entorno PORT para despliegue en la nube
-    
+
     print(f"Iniciando servidor en http://{host}:{port}")
     uvicorn.run(app, host=host, port=port)
