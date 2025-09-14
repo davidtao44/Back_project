@@ -13,8 +13,7 @@ import numpy as np
 from datetime import timedelta
 
 # Importar desde nuestros módulos
-from models import CNNConfig, ImageToVHDLRequest
-from utils import create_cnn, generate_model_filename
+from models import ImageToVHDLRequest
 
 # Importar la función de cuantización
 from model_quantization import modify_and_save_weights
@@ -58,25 +57,7 @@ app.add_middleware(
     allow_headers=["*"],  # Permitir todos los encabezados
 )
 
-@app.post("/create_cnn/")
-def create_cnn_endpoint(config: CNNConfig, current_user: dict = Depends(get_current_user)):
-    try:
-        model = create_cnn(config)
-        model.summary() # para corroborar la arquitectura del modelo
-        
-        # Generar nombre de archivo para el modelo
-        model_filename = generate_model_filename(config.model_name)
-        
-        # Guardar el modelo en disco
-        model.save(model_filename)
-        
-        return {
-            "message": "Modelo creado con éxito", 
-            "layers": [layer.name for layer in model.layers],
-            "model_path": model_filename
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+
 
 @app.get("/")
 def read_root():
@@ -207,8 +188,9 @@ def verify_token_endpoint(current_user: dict = Depends(get_current_user)):
         "user": user_data
     }
 
-@app.get("/list_models/")
-def list_models():
+@app.get("/models/")
+def get_models():
+    """Endpoint para obtener la lista de modelos disponibles"""
     try:
         models_dir = "models"
         if not os.path.exists(models_dir):
@@ -259,6 +241,11 @@ def list_models():
         return {"models": models_info}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/list_models/")
+def list_models():
+    """Endpoint legacy para compatibilidad"""
+    return get_models()
 
 @app.post("/delete_models/")
 def delete_models(model_paths: List[str] = Body(...), current_user: dict = Depends(get_current_user)):

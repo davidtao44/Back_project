@@ -54,6 +54,4 @@ temp/
 back/
 
 #modelos CNN
-quantized_models/
-trained_models/
-untrained_models/
+
