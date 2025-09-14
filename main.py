@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Body, Depends, status
+from fastapi import FastAPI, HTTPException, Body, Depends, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel  # Añadir esta línea
 import uvicorn
@@ -11,6 +11,7 @@ import io
 from PIL import Image
 import numpy as np
 from datetime import timedelta
+import shutil
 
 # Importar desde nuestros módulos
 from models import ImageToVHDLRequest
@@ -246,6 +247,64 @@ def get_models():
 def list_models():
     """Endpoint legacy para compatibilidad"""
     return get_models()
+
+@app.post("/upload_model/")
+async def upload_model(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    """
+    Endpoint para subir modelos CNN preentrenados
+    """
+    try:
+        # Verificar que el archivo sea un modelo válido
+        if not file.filename.endswith(('.h5', '.keras')):
+            raise HTTPException(
+                status_code=400, 
+                detail="Solo se permiten archivos .h5 o .keras"
+            )
+        
+        # Crear directorio models si no existe
+        models_dir = "models"
+        os.makedirs(models_dir, exist_ok=True)
+        
+        # Generar nombre único para evitar conflictos
+        timestamp = int(time.time())
+        filename = f"{timestamp}_{file.filename}"
+        file_path = os.path.join(models_dir, filename)
+        
+        # Guardar el archivo
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Verificar que el archivo se puede cargar como modelo
+        try:
+            model = tf.keras.models.load_model(file_path)
+            model_info = {
+                "name": filename,
+                "path": file_path,
+                "layers": len(model.layers),
+                "parameters": model.count_params(),
+                "input_shape": str(model.input_shape),
+                "output_shape": str(model.output_shape)
+            }
+        except Exception as e:
+            # Si no se puede cargar, eliminar el archivo
+            os.remove(file_path)
+            raise HTTPException(
+                status_code=400,
+                detail=f"El archivo no es un modelo válido: {str(e)}"
+            )
+        
+        return {
+            "message": "Modelo subido exitosamente",
+            "model_info": model_info
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al subir el modelo: {str(e)}"
+        )
 
 @app.post("/delete_models/")
 def delete_models(model_paths: List[str] = Body(...), current_user: dict = Depends(get_current_user)):

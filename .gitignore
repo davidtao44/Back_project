@@ -53,5 +53,10 @@ tmp/
 temp/
 back/
 
-#modelos CNN
+#pesos de la red en vhdl
+model_weights/
+
+#imagen en VHDL
+Memoria_Imagen.vhdl.txt
+
 
