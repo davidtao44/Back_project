@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Body, Depends, status, UploadFile, File
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel  # Añadir esta línea
 import uvicorn
@@ -12,6 +13,7 @@ from PIL import Image
 import numpy as np
 from datetime import timedelta
 import shutil
+import uuid
 
 # Importar desde nuestros módulos
 from models import ImageToVHDLRequest, FaultInjectorRequest
@@ -21,6 +23,9 @@ from model_quantization import modify_and_save_weights
 
 # Importar bibliotecas adicionales si no están ya importadas
 import keras
+
+# Importar inferencia manual
+from fault_injection.manual_inference import ManualInference
 
 # Importar módulos de autenticación
 from auth import (
@@ -79,6 +84,76 @@ def register(user: UserCreate):
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/cleanup_sessions/")
+def cleanup_old_sessions(max_age_hours: int = 24, current_user: dict = Depends(get_current_user)):
+    """Limpia las carpetas de sesión más antiguas que max_age_hours"""
+    try:
+        base_dir = os.path.join(os.path.dirname(__file__), "layer_outputs")
+        if not os.path.exists(base_dir):
+            return {"message": "No hay carpetas de sesión para limpiar"}
+        
+        current_time = time.time()
+        max_age_seconds = max_age_hours * 3600
+        cleaned_sessions = []
+        
+        for session_folder in os.listdir(base_dir):
+            session_path = os.path.join(base_dir, session_folder)
+            if os.path.isdir(session_path):
+                # Verificar la edad de la carpeta
+                folder_age = current_time - os.path.getctime(session_path)
+                if folder_age > max_age_seconds:
+                    shutil.rmtree(session_path)
+                    cleaned_sessions.append(session_folder)
+        
+        return {
+            "message": f"Se limpiaron {len(cleaned_sessions)} sesiones antiguas",
+            "cleaned_sessions": cleaned_sessions
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al limpiar sesiones: {str(e)}")
+
+@app.get("/list_sessions/")
+def list_active_sessions(current_user: dict = Depends(get_current_user)):
+    """Lista todas las sesiones activas con información básica"""
+    try:
+        base_dir = os.path.join(os.path.dirname(__file__), "layer_outputs")
+        if not os.path.exists(base_dir):
+            return {"sessions": []}
+        
+        sessions = []
+        current_time = time.time()
+        
+        for session_folder in os.listdir(base_dir):
+            session_path = os.path.join(base_dir, session_folder)
+            if os.path.isdir(session_path):
+                # Obtener información de la sesión
+                creation_time = os.path.getctime(session_path)
+                age_hours = (current_time - creation_time) / 3600
+                
+                # Contar archivos en la sesión
+                file_count = 0
+                for root, dirs, files in os.walk(session_path):
+                    file_count += len(files)
+                
+                sessions.append({
+                    "session_id": session_folder,
+                    "created_at": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(creation_time)),
+                    "age_hours": round(age_hours, 2),
+                    "file_count": file_count
+                })
+        
+        # Ordenar por fecha de creación (más recientes primero)
+        sessions.sort(key=lambda x: x['created_at'], reverse=True)
+        
+        return {
+            "total_sessions": len(sessions),
+            "sessions": sessions
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al listar sesiones: {str(e)}")
 
 @app.post("/auth/login", response_model=Token)
 def login(user_credentials: UserLogin):
@@ -614,67 +689,95 @@ def extract_model_weights(request: ModelWeightsRequest):
 @app.get("/download_file/")
 def download_file(file_path: str):
     try:
-        if not os.path.exists(file_path):
+        # Si es una ruta relativa, buscar en todas las carpetas de sesión
+        if not os.path.isabs(file_path):
+            base_dir = os.path.join(os.path.dirname(__file__), "layer_outputs")
+            
+            # Buscar el archivo en todas las subcarpetas de sesión
+            found_file = None
+            if os.path.exists(base_dir):
+                for session_folder in os.listdir(base_dir):
+                    session_path = os.path.join(base_dir, session_folder)
+                    if os.path.isdir(session_path):
+                        potential_file = os.path.join(session_path, file_path)
+                        if os.path.exists(potential_file):
+                            found_file = potential_file
+                            break
+            
+            if found_file is None:
+                # Fallback: buscar directamente en layer_outputs
+                fallback_path = os.path.join(base_dir, file_path)
+                if os.path.exists(fallback_path):
+                    found_file = fallback_path
+            
+            full_path = found_file
+        else:
+            full_path = file_path
+        
+        # Verificar que el archivo existe
+        if not full_path or not os.path.exists(full_path):
             raise HTTPException(status_code=404, detail=f"Archivo no encontrado: {os.path.basename(file_path)}")
         
-        # Leer el contenido del archivo
-        with open(file_path, "r") as f:
-            content = f.read()
+        # Determinar el tipo de archivo y el media type
+        filename = os.path.basename(full_path)
+        file_extension = os.path.splitext(filename)[1].lower()
         
-        return {"content": content, "filename": os.path.basename(file_path)}
+        if file_extension == '.png':
+            media_type = 'image/png'
+        elif file_extension == '.xlsx':
+            media_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        elif file_extension == '.jpg' or file_extension == '.jpeg':
+            media_type = 'image/jpeg'
+        else:
+            media_type = 'application/octet-stream'
+        
+        return FileResponse(
+            path=full_path,
+            media_type=media_type,
+            filename=filename
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/fault_injector/inference/")
 async def fault_injector_inference(file: UploadFile = File(...), model_path: str = Body(...), current_user: dict = Depends(get_current_user)):
     """
-    Endpoint para realizar inferencia con FaultInjector
+    Endpoint para realizar inferencia manual con FaultInjector
     """
     try:
         # Validar que el archivo sea una imagen
         if not file.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="El archivo debe ser una imagen")
         
-        # Leer y procesar la imagen
+        # Leer los datos de la imagen
         image_data = await file.read()
-        image = Image.open(io.BytesIO(image_data))
         
-        # Convertir a escala de grises para LeNet-5 (espera 1 canal)
-        if image.mode != 'L':
-            image = image.convert('L')
-        
-        # Redimensionar a 32x32 para compatibilidad con LeNet-5
-        image = image.resize((32, 32))
-        
-        # Convertir a array numpy y normalizar
-        image_array = np.array(image) / 255.0
-        image_array = np.expand_dims(image_array, axis=0)  # Añadir dimensión batch
-        image_array = np.expand_dims(image_array, axis=-1)  # Añadir dimensión de canal
-        
-        # Cargar el modelo
+        # Validar que el modelo existe
         if not os.path.exists(model_path):
             raise HTTPException(status_code=404, detail="Modelo no encontrado")
         
-        model = tf.keras.models.load_model(model_path)
+        # Crear instancia de ManualInference con ruta absoluta y session_id único
+        output_dir = os.path.join(os.path.dirname(__file__), "layer_outputs")
+        session_id = f"user_{current_user.get('uid', 'anonymous')}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
+        manual_inference = ManualInference(model_path, output_dir=output_dir, session_id=session_id)
         
-        # Realizar predicción
-        predictions = model.predict(image_array)
+        # Realizar inferencia manual
+        results = manual_inference.perform_manual_inference(image_data)
         
-        # Obtener la clase predicha y la confianza
-        predicted_class = int(np.argmax(predictions[0]))
-        confidence = float(np.max(predictions[0]))
-        
-        # Obtener todas las probabilidades
-        all_probabilities = predictions[0].tolist()
+        # Convertir rutas absolutas a nombres de archivo para el frontend
+        excel_filenames = [os.path.basename(f) for f in results["excel_files"] if f]
+        image_filenames = [os.path.basename(f) for f in results["image_files"] if f]
         
         return {
             "success": True,
-            "predicted_class": predicted_class,
-            "confidence": confidence,
-            "all_probabilities": all_probabilities,
+            "predicted_class": results["final_prediction"]["predicted_class"],
+            "confidence": results["final_prediction"]["confidence"],
+            "all_probabilities": results["final_prediction"]["all_probabilities"],
+            "layer_outputs": results["layer_outputs"],
+            "excel_files": excel_filenames,
+            "image_files": image_filenames,
             "model_used": os.path.basename(model_path),
-            "image_shape": image_array.shape[1:],
-            "message": "Inferencia completada exitosamente"
+            "message": "Inferencia manual completada exitosamente"
         }
         
     except Exception as e:

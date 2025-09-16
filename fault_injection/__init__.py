@@ -1,0 +1,1 @@
+# Módulo de inyección de fallos para el backend

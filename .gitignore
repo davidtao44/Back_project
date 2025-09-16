@@ -59,4 +59,7 @@ model_weights/
 #imagen en VHDL
 Memoria_Imagen.vhdl.txt
 
+#layeroutpouts golden
+layer_outputs/
+
 
