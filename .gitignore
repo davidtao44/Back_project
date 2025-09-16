@@ -53,13 +53,17 @@ tmp/
 temp/
 back/
 
-#pesos de la red en vhdl
-model_weights/
+#modelos CNN
+models/
 
-#imagen en VHDL
-Memoria_Imagen.vhdl.txt
+#pesos de la red en vhdl
+model_weights_outputs/
+
+#imagenes en VHDL
+vhdl_outputs/
 
 #layeroutpouts golden
 layer_outputs/
+
 
 

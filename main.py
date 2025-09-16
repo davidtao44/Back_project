@@ -89,25 +89,35 @@ def register(user: UserCreate):
 def cleanup_old_sessions(max_age_hours: int = 24, current_user: dict = Depends(get_current_user)):
     """Limpia las carpetas de sesión más antiguas que max_age_hours"""
     try:
-        base_dir = os.path.join(os.path.dirname(__file__), "layer_outputs")
-        if not os.path.exists(base_dir):
-            return {"message": "No hay carpetas de sesión para limpiar"}
+        # Directorios de sesión a limpiar
+        session_dirs = [
+            os.path.join(os.path.dirname(__file__), "layer_outputs"),
+            os.path.join(os.path.dirname(__file__), "vhdl_outputs"),
+            os.path.join(os.path.dirname(__file__), "model_weights_outputs")
+        ]
         
         current_time = time.time()
         max_age_seconds = max_age_hours * 3600
         cleaned_sessions = []
+        total_cleaned = 0
         
-        for session_folder in os.listdir(base_dir):
-            session_path = os.path.join(base_dir, session_folder)
-            if os.path.isdir(session_path):
-                # Verificar la edad de la carpeta
-                folder_age = current_time - os.path.getctime(session_path)
-                if folder_age > max_age_seconds:
-                    shutil.rmtree(session_path)
-                    cleaned_sessions.append(session_folder)
+        for base_dir in session_dirs:
+            if os.path.exists(base_dir):
+                for session_folder in os.listdir(base_dir):
+                    session_path = os.path.join(base_dir, session_folder)
+                    if os.path.isdir(session_path):
+                        # Verificar la edad de la carpeta
+                        folder_age = current_time - os.path.getctime(session_path)
+                        if folder_age > max_age_seconds:
+                            shutil.rmtree(session_path)
+                            cleaned_sessions.append(f"{os.path.basename(base_dir)}/{session_folder}")
+                            total_cleaned += 1
+        
+        if total_cleaned == 0:
+            return {"message": "No hay carpetas de sesión antiguas para limpiar"}
         
         return {
-            "message": f"Se limpiaron {len(cleaned_sessions)} sesiones antiguas",
+            "message": f"Se limpiaron {total_cleaned} sesiones antiguas",
             "cleaned_sessions": cleaned_sessions
         }
     
@@ -118,31 +128,37 @@ def cleanup_old_sessions(max_age_hours: int = 24, current_user: dict = Depends(g
 def list_active_sessions(current_user: dict = Depends(get_current_user)):
     """Lista todas las sesiones activas con información básica"""
     try:
-        base_dir = os.path.join(os.path.dirname(__file__), "layer_outputs")
-        if not os.path.exists(base_dir):
-            return {"sessions": []}
+        # Directorios de sesión a listar
+        session_dirs = [
+            ("layer_outputs", os.path.join(os.path.dirname(__file__), "layer_outputs")),
+            ("vhdl_outputs", os.path.join(os.path.dirname(__file__), "vhdl_outputs")),
+            ("model_weights_outputs", os.path.join(os.path.dirname(__file__), "model_weights_outputs"))
+        ]
         
         sessions = []
         current_time = time.time()
         
-        for session_folder in os.listdir(base_dir):
-            session_path = os.path.join(base_dir, session_folder)
-            if os.path.isdir(session_path):
-                # Obtener información de la sesión
-                creation_time = os.path.getctime(session_path)
-                age_hours = (current_time - creation_time) / 3600
-                
-                # Contar archivos en la sesión
-                file_count = 0
-                for root, dirs, files in os.walk(session_path):
-                    file_count += len(files)
-                
-                sessions.append({
-                    "session_id": session_folder,
-                    "created_at": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(creation_time)),
-                    "age_hours": round(age_hours, 2),
-                    "file_count": file_count
-                })
+        for dir_type, base_dir in session_dirs:
+            if os.path.exists(base_dir):
+                for session_folder in os.listdir(base_dir):
+                    session_path = os.path.join(base_dir, session_folder)
+                    if os.path.isdir(session_path):
+                        # Obtener información de la sesión
+                        creation_time = os.path.getctime(session_path)
+                        age_hours = (current_time - creation_time) / 3600
+                        
+                        # Contar archivos en la sesión
+                        file_count = 0
+                        for root, dirs, files in os.walk(session_path):
+                            file_count += len(files)
+                        
+                        sessions.append({
+                            "session_id": session_folder,
+                            "session_type": dir_type,
+                            "created_at": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(creation_time)),
+                            "age_hours": round(age_hours, 2),
+                            "file_count": file_count
+                        })
         
         # Ordenar por fecha de creación (más recientes primero)
         sessions.sort(key=lambda x: x['created_at'], reverse=True)
@@ -431,7 +447,7 @@ def quantize_model(model_path: str = Body(...), multiplication_factor: int = Bod
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/convert_image_to_vhdl/")
-async def convert_image_to_vhdl(request: ImageToVHDLRequest):
+async def convert_image_to_vhdl(request: ImageToVHDLRequest, current_user: dict = Depends(get_current_user)):
     try:
         # Decodificar la imagen desde base64
         image_data = request.image_data
@@ -473,9 +489,14 @@ async def convert_image_to_vhdl(request: ImageToVHDLRequest):
         # Generar código VHDL
         vhdl_code = generate_vhdl_code(vhdl_matrix, request.width, request.height)
         
+        # Crear directorio de sesión único para el usuario
+        session_id = f"user_{current_user.get('uid', 'anonymous')}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
+        session_dir = os.path.join(os.path.dirname(__file__), "vhdl_outputs", session_id)
+        os.makedirs(session_dir, exist_ok=True)
+        
         # Guardar el código VHDL en un archivo de texto con la estructura de Memoria_Imagen.vhd
-        # output_path = "c:/Users/PC/Documents/UNIVERSIDAD/Project/Back_project/Memoria_Imagen.vhdl.txt"
-        output_path = os.path.join(os.path.dirname(__file__), "Memoria_Imagen.vhdl.txt")
+        output_filename = f"Memoria_Imagen_{session_id}.vhdl.txt"
+        output_path = os.path.join(session_dir, output_filename)
         with open(output_path, "w") as f:
             f.write(vhdl_code)
         
@@ -484,7 +505,8 @@ async def convert_image_to_vhdl(request: ImageToVHDLRequest):
             "decimal_matrix": decimal_matrix,
             "hex_matrix": hex_matrix,
             "vhdl_code": vhdl_code,
-            "file_path": output_path
+            "file_path": output_filename,  # Retornar solo el nombre del archivo
+            "session_id": session_id
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -651,14 +673,18 @@ class ModelWeightsRequest(BaseModel):
 
 # Endpoint para extraer pesos y sesgos del modelo
 @app.post("/extract_model_weights/")
-def extract_model_weights(request: ModelWeightsRequest):
+def extract_model_weights(request: ModelWeightsRequest, current_user: dict = Depends(get_current_user)):
     try:
         if not os.path.exists(request.model_path):
             raise HTTPException(status_code=404, detail=f"Modelo no encontrado: {os.path.basename(request.model_path)}")
         
-        # Crear directorio de salida
-        output_dir = request.output_dir
-        os.makedirs(output_dir, exist_ok=True)
+        # Crear directorio de sesión único para el usuario
+        session_id = f"user_{current_user.get('uid', 'anonymous')}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
+        session_dir = os.path.join(os.path.dirname(__file__), "model_weights_outputs", session_id)
+        os.makedirs(session_dir, exist_ok=True)
+        
+        # Usar el directorio de sesión como output_dir
+        output_dir = session_dir
         
         # Cargar el modelo
         model = keras.models.load_model(request.model_path)
@@ -675,12 +701,16 @@ def extract_model_weights(request: ModelWeightsRequest):
         # Combinar todos los archivos generados
         generated_files = conv_files + dense_files
         
+        # Convertir rutas absolutas a nombres de archivo relativos
+        relative_files = [os.path.basename(file_path) for file_path in generated_files]
+        
         return {
             "success": True,
             "message": f"Pesos y sesgos extraídos exitosamente con {bits_value} bits",
             "model": os.path.basename(request.model_path),
-            "output_dir": output_dir,
-            "files": generated_files
+            "output_dir": os.path.basename(output_dir),
+            "files": relative_files,
+            "session_id": session_id
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -691,24 +721,41 @@ def download_file(file_path: str):
     try:
         # Si es una ruta relativa, buscar en todas las carpetas de sesión
         if not os.path.isabs(file_path):
-            base_dir = os.path.join(os.path.dirname(__file__), "layer_outputs")
+            # Directorios donde buscar archivos
+            search_dirs = [
+                os.path.join(os.path.dirname(__file__), "layer_outputs"),
+                os.path.join(os.path.dirname(__file__), "vhdl_outputs"),
+                os.path.join(os.path.dirname(__file__), "model_weights_outputs")
+            ]
             
-            # Buscar el archivo en todas las subcarpetas de sesión
             found_file = None
-            if os.path.exists(base_dir):
-                for session_folder in os.listdir(base_dir):
-                    session_path = os.path.join(base_dir, session_folder)
-                    if os.path.isdir(session_path):
-                        potential_file = os.path.join(session_path, file_path)
-                        if os.path.exists(potential_file):
-                            found_file = potential_file
-                            break
             
+            # Buscar en todos los directorios de sesión
+            for base_dir in search_dirs:
+                if os.path.exists(base_dir):
+                    for session_folder in os.listdir(base_dir):
+                        session_path = os.path.join(base_dir, session_folder)
+                        if os.path.isdir(session_path):
+                            potential_file = os.path.join(session_path, file_path)
+                            if os.path.exists(potential_file):
+                                found_file = potential_file
+                                break
+                    if found_file:
+                        break
+            
+            # Fallback: buscar directamente en los directorios base
             if found_file is None:
-                # Fallback: buscar directamente en layer_outputs
-                fallback_path = os.path.join(base_dir, file_path)
-                if os.path.exists(fallback_path):
-                    found_file = fallback_path
+                for base_dir in search_dirs:
+                    fallback_path = os.path.join(base_dir, file_path)
+                    if os.path.exists(fallback_path):
+                        found_file = fallback_path
+                        break
+            
+            # Fallback adicional: buscar en el directorio raíz del proyecto
+            if found_file is None:
+                root_fallback = os.path.join(os.path.dirname(__file__), file_path)
+                if os.path.exists(root_fallback):
+                    found_file = root_fallback
             
             full_path = found_file
         else:
