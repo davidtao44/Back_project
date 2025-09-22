@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 class ConvLayer(BaseModel):
     filters: int
@@ -26,9 +26,25 @@ class ImageToVHDLRequest(BaseModel):
     width: int = 32  # Ancho de la imagen redimensionada
     height: int = 32  # Alto de la imagen redimensionada
 
-# Modelo para las solicitudes de FaultInjector
+# Modelos para configuración de inyección de fallos
+class LayerFaultConfig(BaseModel):
+    enabled: bool = False
+    num_faults: int = 1
+    fault_type: str = "random"  # "random" o "specific"
+    positions: Optional[List[List[int]]] = None  # Posiciones específicas para fault_type="specific"
+    bit_positions: Optional[List[int]] = None  # Posiciones de bits específicas
+
+class FaultInjectionConfig(BaseModel):
+    enabled: bool = False
+    layers: Dict[str, LayerFaultConfig] = {}
+
+# Modelo para las solicitudes de FaultInjector con configuración de fallos
 class FaultInjectorRequest(BaseModel):
     model_path: str  # Ruta del modelo a usar
     image_data: Optional[str] = None  # Datos de imagen en base64 (opcional)
-    fault_type: Optional[str] = None  # Tipo de fallo a inyectar (opcional)
-    fault_parameters: Optional[dict] = None  # Parámetros específicos del fallo (opcional)
+    fault_config: Optional[FaultInjectionConfig] = None  # Configuración de inyección de fallos
+
+# Modelo para solicitudes de inferencia con inyección de fallos
+class FaultInjectorInferenceRequest(BaseModel):
+    model_path: str
+    fault_config: Optional[FaultInjectionConfig] = None

@@ -10,6 +10,7 @@ from typing import Dict, List, Tuple, Any
 import tensorflow as tf
 import uuid
 import time
+from .bitflip_injector import BitflipFaultInjector
 
 class ManualInference:
     """
@@ -17,7 +18,7 @@ class ManualInference:
     y generar archivos Excel e imágenes de cada capa.
     """
     
-    def __init__(self, model_path: str, output_dir: str = "layer_outputs", session_id: str = None):
+    def __init__(self, model_path: str, output_dir: str = "layer_outputs", session_id: str = None, fault_config: Dict[str, Any] = None):
         self.model = tf.keras.models.load_model(model_path)
         
         # Generar ID único de sesión si no se proporciona
@@ -28,6 +29,15 @@ class ManualInference:
         self.session_id = session_id
         self.base_output_dir = output_dir
         self.output_dir = os.path.join(output_dir, session_id)
+        
+        # Inicializar inyector de fallos
+        self.fault_injector = BitflipFaultInjector()
+        self.fault_enabled = False
+        self.fault_results = []
+        
+        # Configurar fallos si se proporcionan
+        if fault_config:
+            self.configure_fault_injection(fault_config)
         self.layer_outputs = {}
         self.create_output_directory()
     
@@ -35,6 +45,68 @@ class ManualInference:
         """Crear directorio de salida si no existe"""
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
+    
+    def configure_fault_injection(self, fault_config: Dict[str, Any]):
+        """
+        Configurar inyección de fallos.
+        
+        Args:
+            fault_config: Diccionario con configuración de fallos:
+                - enabled: bool - Habilitar inyección de fallos
+                - layers: Dict - Configuración por capa
+        """
+        self.fault_enabled = fault_config.get('enabled', False)
+        
+        if self.fault_enabled:
+            # Limpiar configuración anterior
+            self.fault_injector.clear_faults()
+            
+            # Configurar fallos por capa
+            layers_config = fault_config.get('layers', {})
+            for layer_name, layer_config in layers_config.items():
+                self.fault_injector.configure_fault(layer_name, layer_config)
+    
+    def apply_fault_injection(self, activations: np.ndarray, layer_name: str) -> np.ndarray:
+        """
+        Aplicar inyección de fallos a las activaciones de una capa.
+        
+        Args:
+            activations: Activaciones de la capa
+            layer_name: Nombre de la capa
+            
+        Returns:
+            Activaciones modificadas (con o sin fallos)
+        """
+        if not self.fault_enabled:
+            return activations
+            
+        modified_activations, injected_faults = self.fault_injector.inject_faults_in_activations(
+            activations, layer_name
+        )
+        
+        # Registrar fallos inyectados
+        if injected_faults:
+            self.fault_results.extend(injected_faults)
+            print(f"Inyectados {len(injected_faults)} fallos en capa {layer_name}")
+            for i, fault in enumerate(injected_faults):
+                diff = abs(fault['modified_value'] - fault['original_value'])
+                print(f"  Fallo {i+1}: pos={fault['position']}, bit={fault['bit_position']}, "
+                      f"original={fault['original_value']:.6f}, "
+                      f"modificado={fault['modified_value']:.6f}, "
+                      f"diferencia={diff:.6f}")
+            
+        return modified_activations
+    
+    def get_fault_summary(self) -> Dict[str, Any]:
+        """Obtener resumen de fallos inyectados en esta inferencia."""
+        if not self.fault_enabled:
+            return {'fault_injection_enabled': False}
+            
+        summary = self.fault_injector.get_fault_summary()
+        summary['fault_injection_enabled'] = True
+        summary['session_id'] = self.session_id
+        
+        return summary
     
     def preprocess_image(self, image_data: bytes) -> np.ndarray:
         """Preprocesar imagen para LeNet-5"""
@@ -214,6 +286,9 @@ class ManualInference:
         feature_maps1 = self.conv2d_manual(imagen_procesada, filters1, biases1)
         feature_maps1 = self.relu_activation(feature_maps1)
         
+        # Aplicar inyección de fallos si está habilitada
+        feature_maps1 = self.apply_fault_injection(feature_maps1, "conv2d_1")
+        
         # Guardar resultados
         excel_file1 = self.save_feature_maps_to_excel(feature_maps1, "conv2d_1")
         image_files1 = self.save_feature_maps_as_images(feature_maps1, "conv2d_1")
@@ -228,6 +303,9 @@ class ManualInference:
         strides1 = pool_layer1.strides
         
         pooled_maps1 = self.maxpool2d_manual(feature_maps1, pool_size1, strides1)
+        
+        # Aplicar inyección de fallos si está habilitada
+        pooled_maps1 = self.apply_fault_injection(pooled_maps1, "maxpooling2d_1")
         
         # Guardar resultados
         excel_file_pool1 = self.save_feature_maps_to_excel(pooled_maps1, "maxpooling2d_1")
@@ -244,6 +322,9 @@ class ManualInference:
         feature_maps2 = self.conv2d_manual(pooled_maps1, filters2, biases2)
         feature_maps2 = self.relu_activation(feature_maps2)
         
+        # Aplicar inyección de fallos si está habilitada
+        feature_maps2 = self.apply_fault_injection(feature_maps2, "conv2d_2")
+        
         # Guardar resultados
         excel_file2 = self.save_feature_maps_to_excel(feature_maps2, "conv2d_2")
         image_files2 = self.save_feature_maps_as_images(feature_maps2, "conv2d_2")
@@ -259,6 +340,9 @@ class ManualInference:
         
         pooled_maps2 = self.maxpool2d_manual(feature_maps2, pool_size2, strides2)
         
+        # Aplicar inyección de fallos si está habilitada
+        pooled_maps2 = self.apply_fault_injection(pooled_maps2, "maxpooling2d_2")
+        
         # Guardar resultados
         excel_file_pool2 = self.save_feature_maps_to_excel(pooled_maps2, "maxpooling2d_2")
         image_files_pool2 = self.save_feature_maps_as_images(pooled_maps2, "maxpooling2d_2")
@@ -269,6 +353,9 @@ class ManualInference:
         
         # ==================== FLATTEN ====================
         flatten_output = pooled_maps2.flatten()
+        
+        # Aplicar inyección de fallos si está habilitada
+        flatten_output = self.apply_fault_injection(flatten_output, "flatten")
         
         # Guardar resultados
         excel_file_flatten = self.save_feature_maps_to_excel(flatten_output, "flatten")
@@ -282,6 +369,9 @@ class ManualInference:
         dense_output1 = self.dense_manual(flatten_output, weights1, biases1_dense)
         dense_output1 = self.relu_activation(dense_output1)
         
+        # Aplicar inyección de fallos si está habilitada
+        dense_output1 = self.apply_fault_injection(dense_output1, "dense_1")
+        
         # Guardar resultados
         excel_file_dense1 = self.save_feature_maps_to_excel(dense_output1, "dense_1")
         results["layer_outputs"]["dense_1"] = dense_output1.shape
@@ -294,6 +384,9 @@ class ManualInference:
         dense_output2 = self.dense_manual(dense_output1, weights2, biases2_dense)
         dense_output2 = self.relu_activation(dense_output2)
         
+        # Aplicar inyección de fallos si está habilitada
+        dense_output2 = self.apply_fault_injection(dense_output2, "dense_2")
+        
         # Guardar resultados
         excel_file_dense2 = self.save_feature_maps_to_excel(dense_output2, "dense_2")
         results["layer_outputs"]["dense_2"] = dense_output2.shape
@@ -304,6 +397,10 @@ class ManualInference:
         weights3, biases3_dense = dense_layer3.get_weights()
         
         dense_output3 = self.dense_manual(dense_output2, weights3, biases3_dense)
+        
+        # Aplicar inyección de fallos si está habilitada (antes del softmax)
+        dense_output3 = self.apply_fault_injection(dense_output3, "dense_3")
+        
         softmax_output = self.softmax_activation(dense_output3)
         
         # Guardar resultados
@@ -345,6 +442,10 @@ class ManualInference:
         
         results["excel_files"].sort(key=lambda x: get_layer_order(os.path.basename(x)))
         results["image_files"].sort(key=lambda x: (get_layer_order(os.path.basename(x)), os.path.basename(x)))
+        
+        # Agregar información de inyección de fallos
+        results["fault_injection"] = self.get_fault_summary()
+        results["session_id"] = self.session_id
         
         print(f"Inferencia completada. Archivos Excel: {len(results['excel_files'])}, Imágenes: {len(results['image_files'])}")
         

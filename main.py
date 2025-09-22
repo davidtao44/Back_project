@@ -16,7 +16,7 @@ import shutil
 import uuid
 
 # Importar desde nuestros módulos
-from models import ImageToVHDLRequest, FaultInjectorRequest
+from models import ImageToVHDLRequest, FaultInjectorRequest, FaultInjectorInferenceRequest, FaultInjectionConfig
 
 # Importar la función de cuantización
 from model_quantization import modify_and_save_weights
@@ -717,7 +717,7 @@ def extract_model_weights(request: ModelWeightsRequest, current_user: dict = Dep
 
 # Endpoint para descargar archivos generados
 @app.get("/download_file/")
-def download_file(file_path: str):
+def download_file(file_path: str, t: str = None):  # Agregar parámetro t para cache busting (opcional)
     try:
         # Si es una ruta relativa, buscar en todas las carpetas de sesión
         if not os.path.isabs(file_path):
@@ -730,18 +730,37 @@ def download_file(file_path: str):
             
             found_file = None
             
-            # Buscar en todos los directorios de sesión
-            for base_dir in search_dirs:
-                if os.path.exists(base_dir):
-                    for session_folder in os.listdir(base_dir):
-                        session_path = os.path.join(base_dir, session_folder)
+            # Si se proporciona un session_id (parámetro t), buscar primero en esa sesión específica
+            if t:
+                for base_dir in search_dirs:
+                    if os.path.exists(base_dir):
+                        session_path = os.path.join(base_dir, t)
                         if os.path.isdir(session_path):
                             potential_file = os.path.join(session_path, file_path)
                             if os.path.exists(potential_file):
                                 found_file = potential_file
                                 break
-                    if found_file:
-                        break
+                if found_file:
+                    pass  # Ya encontramos el archivo en la sesión específica
+            
+            # Si no se encontró en la sesión específica, buscar en todas las sesiones (ordenadas por fecha de modificación)
+            if found_file is None:
+                session_files = []
+                for base_dir in search_dirs:
+                    if os.path.exists(base_dir):
+                        for session_folder in os.listdir(base_dir):
+                            session_path = os.path.join(base_dir, session_folder)
+                            if os.path.isdir(session_path):
+                                potential_file = os.path.join(session_path, file_path)
+                                if os.path.exists(potential_file):
+                                    # Agregar el archivo con su tiempo de modificación
+                                    mtime = os.path.getmtime(potential_file)
+                                    session_files.append((potential_file, mtime))
+                
+                # Ordenar por tiempo de modificación (más reciente primero) y tomar el primero
+                if session_files:
+                    session_files.sort(key=lambda x: x[1], reverse=True)
+                    found_file = session_files[0][0]
             
             # Fallback: buscar directamente en los directorios base
             if found_file is None:
@@ -778,18 +797,71 @@ def download_file(file_path: str):
         else:
             media_type = 'application/octet-stream'
         
-        return FileResponse(
+        # Crear FileResponse con headers para prevenir caché
+        response = FileResponse(
             path=full_path,
             media_type=media_type,
             filename=filename
         )
+        
+        # Agregar headers para prevenir caché del navegador
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        
+        return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/fault_injector/inference/")
-async def fault_injector_inference(file: UploadFile = File(...), model_path: str = Body(...), current_user: dict = Depends(get_current_user)):
+@app.post("/fault_injector/configure/")
+async def configure_fault_injection(
+    fault_config: FaultInjectionConfig,
+    current_user: dict = Depends(get_current_user)
+):
     """
-    Endpoint para realizar inferencia manual con FaultInjector
+    Endpoint para configurar la inyección de fallos
+    """
+    try:
+        # Validar la configuración
+        if not fault_config.layers:
+            raise HTTPException(status_code=400, detail="Debe especificar al menos una capa para inyección de fallos")
+        
+        # Validar que los tipos de fallos sean válidos
+        valid_fault_types = ["bit_flip", "stuck_at_0", "stuck_at_1", "random_noise"]
+        for layer_name, layer_config in fault_config.layers.items():
+            if layer_config.fault_type not in valid_fault_types:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Tipo de fallo inválido '{layer_config.fault_type}' para la capa '{layer_name}'. Tipos válidos: {valid_fault_types}"
+                )
+            
+            # Validar parámetros específicos
+            if layer_config.fault_rate < 0 or layer_config.fault_rate > 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"La tasa de fallos debe estar entre 0 y 1 para la capa '{layer_name}'"
+                )
+        
+        return {
+            "success": True,
+            "message": "Configuración de inyección de fallos validada correctamente",
+            "config": fault_config.dict(),
+            "layers_configured": len(fault_config.layers),
+            "enabled": fault_config.enabled
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al configurar inyección de fallos: {str(e)}")
+
+@app.post("/fault_injector/inference/")
+async def fault_injector_inference(
+    file: UploadFile = File(...), 
+    model_path: str = Body(...), 
+    fault_config: str = Body(None),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Endpoint para realizar inferencia manual con FaultInjector y configuración de fallos
     """
     try:
         # Validar que el archivo sea una imagen
@@ -803,10 +875,24 @@ async def fault_injector_inference(file: UploadFile = File(...), model_path: str
         if not os.path.exists(model_path):
             raise HTTPException(status_code=404, detail="Modelo no encontrado")
         
+        # Procesar configuración de fallos si se proporciona
+        fault_config_dict = None
+        if fault_config:
+            try:
+                import json
+                fault_config_dict = json.loads(fault_config)
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="Configuración de fallos inválida")
+        
         # Crear instancia de ManualInference con ruta absoluta y session_id único
         output_dir = os.path.join(os.path.dirname(__file__), "layer_outputs")
         session_id = f"user_{current_user.get('uid', 'anonymous')}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
-        manual_inference = ManualInference(model_path, output_dir=output_dir, session_id=session_id)
+        manual_inference = ManualInference(
+            model_path, 
+            output_dir=output_dir, 
+            session_id=session_id,
+            fault_config=fault_config_dict
+        )
         
         # Realizar inferencia manual
         results = manual_inference.perform_manual_inference(image_data)
@@ -817,6 +903,7 @@ async def fault_injector_inference(file: UploadFile = File(...), model_path: str
         
         return {
             "success": True,
+            "session_id": results["session_id"],
             "predicted_class": results["final_prediction"]["predicted_class"],
             "confidence": results["final_prediction"]["confidence"],
             "all_probabilities": results["final_prediction"]["all_probabilities"],
@@ -824,6 +911,7 @@ async def fault_injector_inference(file: UploadFile = File(...), model_path: str
             "excel_files": excel_filenames,
             "image_files": image_filenames,
             "model_used": os.path.basename(model_path),
+            "fault_injection": results["fault_injection"],
             "message": "Inferencia manual completada exitosamente"
         }
         
