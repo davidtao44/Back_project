@@ -11,6 +11,7 @@ import tensorflow as tf
 import uuid
 import time
 from .bitflip_injector import BitflipFaultInjector
+from .weight_fault_injector import WeightFaultInjector
 
 class ManualInference:
     """
@@ -30,14 +31,21 @@ class ManualInference:
         self.base_output_dir = output_dir
         self.output_dir = os.path.join(output_dir, session_id)
         
-        # Inicializar inyector de fallos
-        self.fault_injector = BitflipFaultInjector()
+        # Inicializar inyectores de fallos
+        self.fault_injector = BitflipFaultInjector()  # Para activaciones
+        self.weight_fault_injector = WeightFaultInjector()  # Para pesos
         self.fault_enabled = False
+        self.weight_fault_enabled = False
         self.fault_results = []
         
         # Configurar fallos si se proporcionan
         if fault_config:
+            print(f"🔧 DEBUG ManualInference: Configurando fallos con: {fault_config}")
             self.configure_fault_injection(fault_config)
+        else:
+            print("ℹ️ DEBUG ManualInference: No se proporcionó configuración de fallos")
+             
+        # Inicializar variables de estado
         self.layer_outputs = {}
         self.create_output_directory()
     
@@ -51,20 +59,69 @@ class ManualInference:
         Configurar inyección de fallos.
         
         Args:
-            fault_config: Diccionario con configuración de fallos:
-                - enabled: bool - Habilitar inyección de fallos
-                - layers: Dict - Configuración por capa
+            fault_config: Diccionario con configuración de fallos. Puede ser:
+                - Estructura legacy: {enabled, layers} para fallos en activaciones
+                - Estructura nueva: {activation_faults: {enabled, layers}, weight_faults: {enabled, layers}}
         """
-        self.fault_enabled = fault_config.get('enabled', False)
+        print(f"🔧 DEBUG configure_fault_injection: Configuración recibida: {fault_config}")
         
-        if self.fault_enabled:
-            # Limpiar configuración anterior
-            self.fault_injector.clear_faults()
+        # Detectar tipo de configuración
+        if 'activation_faults' in fault_config or 'weight_faults' in fault_config:
+            # Nueva estructura combinada
+            print("🔧 DEBUG configure_fault_injection: Procesando configuración combinada")
             
-            # Configurar fallos por capa
-            layers_config = fault_config.get('layers', {})
-            for layer_name, layer_config in layers_config.items():
-                self.fault_injector.configure_fault(layer_name, layer_config)
+            # Configurar fallos en activaciones
+            activation_config = fault_config.get('activation_faults')
+            if activation_config:
+                self.fault_enabled = activation_config.get('enabled', False)
+                print(f"🔧 DEBUG configure_fault_injection: fault_enabled = {self.fault_enabled}")
+                
+                if self.fault_enabled:
+                    self.fault_injector.clear_faults()
+                    layers_config = activation_config.get('layers', {})
+                    print(f"🔧 DEBUG configure_fault_injection: layers_config = {layers_config}")
+                    for layer_name, layer_config in layers_config.items():
+                        print(f"🔧 DEBUG configure_fault_injection: Configurando capa {layer_name} con {layer_config}")
+                        self.fault_injector.configure_fault(layer_name, layer_config)
+                else:
+                    print("ℹ️ DEBUG configure_fault_injection: Inyección de fallos en activaciones deshabilitada")
+            
+            # Configurar fallos en pesos
+            weight_config = fault_config.get('weight_faults')
+            if weight_config:
+                self.weight_fault_enabled = weight_config.get('enabled', False)
+                print(f"🔧 DEBUG configure_fault_injection: weight_fault_enabled = {self.weight_fault_enabled}")
+                
+                if self.weight_fault_enabled:
+                    self.weight_fault_injector.clear_faults()
+                    self.weight_fault_injector.backup_original_weights(self.model)
+                    
+                    weight_layers_config = weight_config.get('layers', {})
+                    print(f"🔧 DEBUG configure_fault_injection: weight_layers_config = {weight_layers_config}")
+                    
+                    for layer_name, layer_config in weight_layers_config.items():
+                        print(f"🔧 DEBUG configure_fault_injection: Configurando fallos en pesos para capa {layer_name}")
+                        self.weight_fault_injector.configure_fault(layer_name, layer_config)
+                    
+                    weight_faults = self.weight_fault_injector.inject_faults_in_weights(self.model)
+                    print(f"✅ Inyectados {len(weight_faults)} fallos en pesos del modelo")
+                else:
+                    print("ℹ️ DEBUG configure_fault_injection: Inyección de fallos en pesos deshabilitada")
+        else:
+            # Estructura legacy (solo activaciones)
+            print("🔧 DEBUG configure_fault_injection: Procesando configuración legacy")
+            self.fault_enabled = fault_config.get('enabled', False)
+            print(f"🔧 DEBUG configure_fault_injection: fault_enabled = {self.fault_enabled}")
+            
+            if self.fault_enabled:
+                self.fault_injector.clear_faults()
+                layers_config = fault_config.get('layers', {})
+                print(f"🔧 DEBUG configure_fault_injection: layers_config = {layers_config}")
+                for layer_name, layer_config in layers_config.items():
+                    print(f"🔧 DEBUG configure_fault_injection: Configurando capa {layer_name} con {layer_config}")
+                    self.fault_injector.configure_fault(layer_name, layer_config)
+            else:
+                print("ℹ️ DEBUG configure_fault_injection: Inyección de fallos deshabilitada")
     
     def apply_fault_injection(self, activations: np.ndarray, layer_name: str) -> np.ndarray:
         """
@@ -77,9 +134,13 @@ class ManualInference:
         Returns:
             Activaciones modificadas (con o sin fallos)
         """
+        print(f"🔧 DEBUG apply_fault_injection: Procesando capa {layer_name}, fault_enabled = {self.fault_enabled}")
+        
         if not self.fault_enabled:
+            print(f"ℹ️ DEBUG apply_fault_injection: Fallos deshabilitados para capa {layer_name}")
             return activations
             
+        print(f"🔧 DEBUG apply_fault_injection: Intentando inyectar fallos en capa {layer_name}")
         modified_activations, injected_faults = self.fault_injector.inject_faults_in_activations(
             activations, layer_name
         )
@@ -99,12 +160,30 @@ class ManualInference:
     
     def get_fault_summary(self) -> Dict[str, Any]:
         """Obtener resumen de fallos inyectados en esta inferencia."""
-        if not self.fault_enabled:
-            return {'fault_injection_enabled': False}
+        summary = {
+            'activation_fault_injection_enabled': self.fault_enabled,
+            'weight_fault_injection_enabled': self.weight_fault_enabled,
+            'session_id': self.session_id
+        }
+        
+        # Resumen de fallos en activaciones
+        if self.fault_enabled:
+            activation_summary = self.fault_injector.get_fault_summary()
+            summary['activation_faults'] = activation_summary
+        else:
+            summary['activation_faults'] = {'total_faults': 0, 'faults_by_layer': {}, 'fault_details': []}
             
-        summary = self.fault_injector.get_fault_summary()
-        summary['fault_injection_enabled'] = True
-        summary['session_id'] = self.session_id
+        # Resumen de fallos en pesos
+        if self.weight_fault_enabled:
+            weight_summary = self.weight_fault_injector.get_fault_summary()
+            summary['weight_faults'] = weight_summary
+        else:
+            summary['weight_faults'] = {'total_faults': 0, 'faults_by_layer': {}, 'faults_by_type': {}, 'fault_details': []}
+            
+        # Totales combinados
+        total_activation_faults = summary['activation_faults']['total_faults']
+        total_weight_faults = summary['weight_faults']['total_faults']
+        summary['total_faults'] = total_activation_faults + total_weight_faults
         
         return summary
     
@@ -293,7 +372,7 @@ class ManualInference:
         excel_file1 = self.save_feature_maps_to_excel(feature_maps1, "conv2d_1")
         image_files1 = self.save_feature_maps_as_images(feature_maps1, "conv2d_1")
         
-        results["layer_outputs"]["conv2d_1"] = feature_maps1.shape
+        results["layer_outputs"]["conv2d_1"] = tuple(int(x) for x in feature_maps1.shape)
         results["excel_files"].append(excel_file1)
         results["image_files"].extend(image_files1)
         
@@ -311,7 +390,7 @@ class ManualInference:
         excel_file_pool1 = self.save_feature_maps_to_excel(pooled_maps1, "maxpooling2d_1")
         image_files_pool1 = self.save_feature_maps_as_images(pooled_maps1, "maxpooling2d_1")
         
-        results["layer_outputs"]["maxpooling2d_1"] = pooled_maps1.shape
+        results["layer_outputs"]["maxpooling2d_1"] = tuple(int(x) for x in pooled_maps1.shape)
         results["excel_files"].append(excel_file_pool1)
         results["image_files"].extend(image_files_pool1)
         
@@ -329,7 +408,7 @@ class ManualInference:
         excel_file2 = self.save_feature_maps_to_excel(feature_maps2, "conv2d_2")
         image_files2 = self.save_feature_maps_as_images(feature_maps2, "conv2d_2")
         
-        results["layer_outputs"]["conv2d_2"] = feature_maps2.shape
+        results["layer_outputs"]["conv2d_2"] = tuple(int(x) for x in feature_maps2.shape)
         results["excel_files"].append(excel_file2)
         results["image_files"].extend(image_files2)
         
@@ -347,7 +426,7 @@ class ManualInference:
         excel_file_pool2 = self.save_feature_maps_to_excel(pooled_maps2, "maxpooling2d_2")
         image_files_pool2 = self.save_feature_maps_as_images(pooled_maps2, "maxpooling2d_2")
         
-        results["layer_outputs"]["maxpooling2d_2"] = pooled_maps2.shape
+        results["layer_outputs"]["maxpooling2d_2"] = tuple(int(x) for x in pooled_maps2.shape)
         results["excel_files"].append(excel_file_pool2)
         results["image_files"].extend(image_files_pool2)
         
@@ -359,7 +438,7 @@ class ManualInference:
         
         # Guardar resultados
         excel_file_flatten = self.save_feature_maps_to_excel(flatten_output, "flatten")
-        results["layer_outputs"]["flatten"] = flatten_output.shape
+        results["layer_outputs"]["flatten"] = tuple(int(x) for x in flatten_output.shape)
         results["excel_files"].append(excel_file_flatten)
         
         # ==================== PRIMERA CAPA DENSA (120 neuronas) ====================
@@ -374,7 +453,7 @@ class ManualInference:
         
         # Guardar resultados
         excel_file_dense1 = self.save_feature_maps_to_excel(dense_output1, "dense_1")
-        results["layer_outputs"]["dense_1"] = dense_output1.shape
+        results["layer_outputs"]["dense_1"] = tuple(int(x) for x in dense_output1.shape)
         results["excel_files"].append(excel_file_dense1)
         
         # ==================== SEGUNDA CAPA DENSA (84 neuronas) ====================
@@ -389,7 +468,7 @@ class ManualInference:
         
         # Guardar resultados
         excel_file_dense2 = self.save_feature_maps_to_excel(dense_output2, "dense_2")
-        results["layer_outputs"]["dense_2"] = dense_output2.shape
+        results["layer_outputs"]["dense_2"] = tuple(int(x) for x in dense_output2.shape)
         results["excel_files"].append(excel_file_dense2)
         
         # ==================== CAPA FINAL (10 neuronas + Softmax) ====================
@@ -405,7 +484,7 @@ class ManualInference:
         
         # Guardar resultados
         excel_file_softmax = self.save_feature_maps_to_excel(softmax_output, "softmax")
-        results["layer_outputs"]["softmax"] = softmax_output.shape
+        results["layer_outputs"]["softmax"] = tuple(int(x) for x in softmax_output.shape)
         results["excel_files"].append(excel_file_softmax)
         
         # ==================== PREDICCIÓN FINAL ====================

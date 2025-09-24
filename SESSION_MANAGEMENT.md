@@ -86,54 +86,6 @@ Back_project/
 4. **Limpieza Automática**: Sistema de limpieza de sesiones antiguas
 5. **Compatibilidad**: El frontend no necesita cambios, funciona transparentemente
 
-## Ejemplos de Uso
-
-### Flujo Completo de Trabajo
-
-```bash
-# 1. Realizar inferencia manual
-curl -X POST "http://localhost:8003/manual_inference" \
-     -H "Authorization: Bearer YOUR_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"model_path": "path/to/model", "input_data": "data"}'
-
-# 2. Convertir imagen a VHDL
-curl -X POST "http://localhost:8003/convert_image_to_vhdl/" \
-     -H "Authorization: Bearer YOUR_TOKEN" \
-     -F "image=@image.jpg"
-
-# 3. Extraer pesos del modelo
-curl -X POST "http://localhost:8003/extract_model_weights/" \
-     -H "Authorization: Bearer YOUR_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"model_path": "path/to/model.h5"}'
-
-# 4. Descargar archivo generado
-curl -X GET "http://localhost:8003/download_file/archivo.txt" \
-     -H "Authorization: Bearer YOUR_TOKEN" \
-     -o "archivo_descargado.txt"
-```
-
-### Gestión de Sesiones
-
-```bash
-# Listar todas las sesiones activas
-curl -X GET "http://localhost:8003/list_sessions/" \
-     -H "Authorization: Bearer YOUR_TOKEN"
-
-# Limpiar sesiones más antiguas que 24 horas (por defecto)
-curl -X DELETE "http://localhost:8003/cleanup_sessions/" \
-     -H "Authorization: Bearer YOUR_TOKEN"
-
-# Limpiar sesiones más antiguas que 1 hora
-curl -X DELETE "http://localhost:8003/cleanup_sessions/?max_age_hours=1" \
-     -H "Authorization: Bearer YOUR_TOKEN"
-
-# Limpiar sesiones más antiguas que 30 minutos
-curl -X DELETE "http://localhost:8003/cleanup_sessions/?max_age_hours=0.5" \
-     -H "Authorization: Bearer YOUR_TOKEN"
-```
-
 ## Mantenimiento
 
 ### Limpieza Manual

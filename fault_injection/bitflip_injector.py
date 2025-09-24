@@ -80,22 +80,65 @@ class BitflipFaultInjector:
         Returns:
             Tuple con (activaciones_modificadas, lista_de_fallos_inyectados)
         """
+        print(f"🔧 DEBUG BitflipFaultInjector: Procesando capa {layer_name}")
+        print(f"🔧 DEBUG BitflipFaultInjector: Configuración disponible: {list(self.fault_config.keys())}")
+        
         if layer_name not in self.fault_config:
+            print(f"ℹ️ DEBUG BitflipFaultInjector: Capa {layer_name} no está en la configuración")
             return activations.copy(), []
             
         config = self.fault_config[layer_name]
-        if not config.get('enabled', False):
+        print(f"🔧 DEBUG BitflipFaultInjector: Configuración para {layer_name}: {config}")
+        
+        # Verificar si los fallos están habilitados para esta capa
+        # La configuración debe tener fault_type para estar habilitada
+        if not config.get('fault_type'):
+            print(f"ℹ️ DEBUG BitflipFaultInjector: Fallos deshabilitados para capa {layer_name} - sin fault_type")
             return activations.copy(), []
+            
+        # Verificar si fault_rate es mayor que 0
+        fault_rate = config.get('fault_rate', 0)
+        if fault_rate <= 0:
+            print(f"ℹ️ DEBUG BitflipFaultInjector: Fallos deshabilitados para capa {layer_name} - fault_rate: {fault_rate}")
+            return activations.copy(), []
+            
+        print(f"✅ DEBUG BitflipFaultInjector: Fallos HABILITADOS para capa {layer_name} - fault_type: {config.get('fault_type')}, fault_rate: {fault_rate}")
             
         # Crear copia para modificar
         modified_activations = activations.copy()
         injected_faults = []
         
-        num_faults = config.get('num_faults', 1)
-        fault_type = config.get('fault_type', 'random')
+        fault_type = config.get('fault_type', 'bit_flip')
+        fault_rate = config.get('fault_rate', 1)
+        bit_positions = config.get('bit_positions', [15])  # Bits por defecto
         
-        if fault_type == 'random':
-            # Inyección aleatoria
+        print(f"🔧 DEBUG BitflipFaultInjector: Iniciando inyección - fault_type: {fault_type}, fault_rate: {fault_rate}, bit_positions: {bit_positions}")
+        
+        if fault_type == 'bit_flip':
+            # Calcular número de fallos basado en fault_rate
+            total_elements = modified_activations.size
+            num_faults = max(1, int(total_elements * fault_rate))
+            
+            print(f"🔧 DEBUG BitflipFaultInjector: Inyectando {num_faults} fallos en {total_elements} elementos")
+            
+            # Inyección aleatoria de bit flips
+            for i in range(num_faults):
+                # Seleccionar posición aleatoria
+                flat_idx = random.randint(0, total_elements - 1)
+                position = np.unravel_index(flat_idx, modified_activations.shape)
+                
+                # Seleccionar bit aleatorio de la lista
+                bit_pos = random.choice(bit_positions)
+                
+                fault_info = self._inject_specific_fault(
+                    modified_activations, layer_name, position, bit_pos
+                )
+                if fault_info:
+                    injected_faults.append(fault_info)
+                    
+        elif fault_type == 'random':
+            # Inyección aleatoria (método anterior)
+            num_faults = config.get('num_faults', 1)
             for _ in range(num_faults):
                 fault_info = self._inject_random_fault(modified_activations, layer_name)
                 if fault_info:
@@ -104,7 +147,7 @@ class BitflipFaultInjector:
         elif fault_type == 'specific':
             # Inyección en posiciones específicas
             positions = config.get('positions', [])
-            bit_positions = config.get('bit_positions', [15])  # Bit por defecto
+            num_faults = config.get('num_faults', 1)
             
             for pos_idx, position in enumerate(positions[:num_faults]):
                 bit_pos = bit_positions[pos_idx % len(bit_positions)]
@@ -137,12 +180,20 @@ class BitflipFaultInjector:
             else:
                 return None
                 
-            # Generar posición de bit aleatoria con sesgo hacia bits más significativos
-            # 70% probabilidad de bits significativos (15-30), 30% de bits menos significativos (0-14)
-            if random.random() < 0.7:
-                bit_position = random.randint(15, 30)  # Bits más significativos
+            # Obtener configuración de la capa
+            config = self.fault_config.get(layer_name, {})
+            
+            # Usar bits específicos si están configurados, sino usar distribución aleatoria
+            if 'bit_positions' in config and config['bit_positions']:
+                # Seleccionar aleatoriamente de los bits específicos configurados
+                bit_position = random.choice(config['bit_positions'])
             else:
-                bit_position = random.randint(0, 14)   # Bits menos significativos
+                # Generar posición de bit aleatoria con sesgo hacia bits más significativos
+                # 70% probabilidad de bits significativos (15-30), 30% de bits menos significativos (0-14)
+                if random.random() < 0.7:
+                    bit_position = random.randint(15, 30)  # Bits más significativos
+                else:
+                    bit_position = random.randint(0, 14)   # Bits menos significativos
             
             # Obtener valor original
             original_value = activations[pos]
@@ -155,8 +206,8 @@ class BitflipFaultInjector:
             
             return {
                 'layer_name': layer_name,
-                'position': pos,
-                'bit_position': bit_position,
+                'position': tuple(int(x) for x in random_position),
+                'bit_position': int(bit_position),
                 'original_value': float(original_value),
                 'modified_value': float(modified_value),
                 'fault_type': 'random'
@@ -185,8 +236,8 @@ class BitflipFaultInjector:
             
             return {
                 'layer_name': layer_name,
-                'position': position,
-                'bit_position': bit_position,
+                'position': tuple(int(x) for x in position),
+                'bit_position': int(bit_position),
                 'original_value': float(original_value),
                 'modified_value': float(modified_value),
                 'fault_type': 'specific'

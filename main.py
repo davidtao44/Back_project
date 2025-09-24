@@ -881,8 +881,19 @@ async def fault_injector_inference(
             try:
                 import json
                 fault_config_dict = json.loads(fault_config)
+                print(f"🔧 DEBUG: Configuración de fallos recibida: {fault_config_dict}")
+                
+                # Verificar si es la nueva estructura combinada
+                if 'activation_faults' in fault_config_dict or 'weight_faults' in fault_config_dict:
+                    print("🔧 DEBUG: Detectada configuración combinada de fallos")
+                else:
+                    print("🔧 DEBUG: Configuración de fallos legacy (solo activaciones)")
+                    
             except json.JSONDecodeError:
+                print(f"❌ ERROR: Configuración de fallos inválida: {fault_config}")
                 raise HTTPException(status_code=400, detail="Configuración de fallos inválida")
+        else:
+            print("ℹ️ DEBUG: No se recibió configuración de fallos")
         
         # Crear instancia de ManualInference con ruta absoluta y session_id único
         output_dir = os.path.join(os.path.dirname(__file__), "layer_outputs")
