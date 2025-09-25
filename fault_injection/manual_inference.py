@@ -34,7 +34,8 @@ class ManualInference:
         # Inicializar inyectores de fallos
         self.fault_injector = BitflipFaultInjector()  # Para activaciones
         self.weight_fault_injector = WeightFaultInjector()  # Para pesos
-        self.fault_enabled = False
+        self.fault_enabled = False  # Para compatibilidad con configuración legacy
+        self.activation_fault_enabled = False  # Para nueva estructura de configuración
         self.weight_fault_enabled = False
         self.fault_results = []
         
@@ -73,10 +74,10 @@ class ManualInference:
             # Configurar fallos en activaciones
             activation_config = fault_config.get('activation_faults')
             if activation_config:
-                self.fault_enabled = activation_config.get('enabled', False)
-                print(f"🔧 DEBUG configure_fault_injection: fault_enabled = {self.fault_enabled}")
+                self.activation_fault_enabled = activation_config.get('enabled', False)
+                print(f"🔧 DEBUG configure_fault_injection: activation_fault_enabled = {self.activation_fault_enabled}")
                 
-                if self.fault_enabled:
+                if self.activation_fault_enabled:
                     self.fault_injector.clear_faults()
                     layers_config = activation_config.get('layers', {})
                     print(f"🔧 DEBUG configure_fault_injection: layers_config = {layers_config}")
@@ -134,9 +135,11 @@ class ManualInference:
         Returns:
             Activaciones modificadas (con o sin fallos)
         """
-        print(f"🔧 DEBUG apply_fault_injection: Procesando capa {layer_name}, fault_enabled = {self.fault_enabled}")
+        # Verificar si se está usando la nueva estructura de configuración o la legacy
+        fault_enabled = getattr(self, 'activation_fault_enabled', getattr(self, 'fault_enabled', False))
+        print(f"🔧 DEBUG apply_fault_injection: Procesando capa {layer_name}, fault_enabled = {fault_enabled}")
         
-        if not self.fault_enabled:
+        if not fault_enabled:
             print(f"ℹ️ DEBUG apply_fault_injection: Fallos deshabilitados para capa {layer_name}")
             return activations
             
@@ -425,10 +428,53 @@ class ManualInference:
         """Aplicar activación ReLU"""
         return np.maximum(0, x)
     
+    def detect_numerical_errors(self, x: np.ndarray, context: str = "") -> Dict[str, Any]:
+        """Detectar y reportar errores numéricos específicos"""
+        errors = {
+            "has_nan": bool(np.any(np.isnan(x))),
+            "has_inf": bool(np.any(np.isinf(x))),
+            "has_positive_inf": bool(np.any(np.isposinf(x))),
+            "has_negative_inf": bool(np.any(np.isneginf(x))),
+            "overflow_count": int(np.sum(np.isposinf(x))),
+            "underflow_count": int(np.sum(np.isneginf(x))),
+            "nan_count": int(np.sum(np.isnan(x))),
+            "max_finite_value": float(np.max(x[np.isfinite(x)])) if np.any(np.isfinite(x)) else 0.0,
+            "min_finite_value": float(np.min(x[np.isfinite(x)])) if np.any(np.isfinite(x)) else 0.0,
+            "context": context
+        }
+        
+        if errors["has_nan"] or errors["has_inf"]:
+            print(f"🚨 ERROR NUMÉRICO DETECTADO en {context}:")
+            if errors["has_positive_inf"]:
+                print(f"   ➤ OVERFLOW: {errors['overflow_count']} valores +∞ (desbordamiento positivo)")
+            if errors["has_negative_inf"]:
+                print(f"   ➤ UNDERFLOW: {errors['underflow_count']} valores -∞ (desbordamiento negativo)")
+            if errors["has_nan"]:
+                print(f"   ➤ NaN: {errors['nan_count']} valores no numéricos (operación inválida)")
+            if errors["max_finite_value"] is not None:
+                print(f"   ➤ Valor finito máximo: {errors['max_finite_value']}")
+            if errors["min_finite_value"] is not None:
+                print(f"   ➤ Valor finito mínimo: {errors['min_finite_value']}")
+        
+        return errors
+
     def softmax_activation(self, x: np.ndarray) -> np.ndarray:
-        """Aplicar activación Softmax"""
+        """Aplicar activación Softmax con detección de errores numéricos"""
+        # Detectar errores en la entrada
+        input_errors = self.detect_numerical_errors(x, "entrada de softmax")
+        
+        # Aplicar softmax estándar
         exp_values = np.exp(x - np.max(x))
-        return exp_values / np.sum(exp_values)
+        
+        # Detectar errores en exponenciales
+        exp_errors = self.detect_numerical_errors(exp_values, "exponenciales de softmax")
+        
+        result = exp_values / np.sum(exp_values)
+        
+        # Detectar errores en resultado final
+        result_errors = self.detect_numerical_errors(result, "resultado de softmax")
+        
+        return result
     
     def perform_manual_inference(self, image_data: bytes) -> Dict[str, Any]:
         """Realizar inferencia manual completa"""
@@ -575,15 +621,75 @@ class ManualInference:
         results["excel_files"].append(excel_file_softmax)
         
         # ==================== PREDICCIÓN FINAL ====================
-        predicted_class = int(np.argmax(softmax_output))
-        confidence = float(np.max(softmax_output))
-        all_probabilities = softmax_output.tolist()
+        # Detectar errores numéricos en la salida de softmax
+        softmax_errors = self.detect_numerical_errors(softmax_output, "predicción final")
         
-        results["final_prediction"] = {
-            "predicted_class": predicted_class,
-            "confidence": confidence,
-            "all_probabilities": all_probabilities
-        }
+        # Preservar probabilidades originales para mostrar en el frontend
+        original_probabilities = [float(prob) for prob in softmax_output]
+        
+        # Intentar calcular predicción incluso con errores
+        try:
+            predicted_class = int(np.argmax(softmax_output)) if np.any(np.isfinite(softmax_output)) else -1
+            confidence = float(np.max(softmax_output[np.isfinite(softmax_output)])) if np.any(np.isfinite(softmax_output)) else 0.0
+            # Para JSON serialization, mantener valores originales pero marcar los problemáticos
+            all_probabilities = []
+            for prob in softmax_output:
+                if np.isfinite(prob):
+                    all_probabilities.append(float(prob))
+                elif np.isnan(prob):
+                    all_probabilities.append("NaN")
+                elif np.isposinf(prob):
+                    all_probabilities.append("Infinity")
+                elif np.isneginf(prob):
+                    all_probabilities.append("-Infinity")
+                else:
+                    all_probabilities.append(0.0)
+        except Exception as e:
+            print(f"❌ Error al calcular predicción: {str(e)}")
+            predicted_class = -1
+            confidence = 0.0
+            all_probabilities = [0.0] * len(softmax_output)
+            original_probabilities = [0.0] * len(softmax_output)
+        
+        # Determinar si hay errores críticos que impiden la serialización JSON
+        has_critical_errors = softmax_errors["has_nan"] or softmax_errors["has_inf"]
+        
+        if has_critical_errors:
+            # Crear respuesta de error informativa
+            error_info = {
+                "error_type": "numerical_overflow_underflow",
+                "error_details": {
+                    "overflow_detected": softmax_errors["has_positive_inf"],
+                    "underflow_detected": softmax_errors["has_negative_inf"],
+                    "nan_detected": softmax_errors["has_nan"],
+                    "overflow_count": softmax_errors["overflow_count"],
+                    "underflow_count": softmax_errors["underflow_count"],
+                    "nan_count": softmax_errors["nan_count"],
+                    "description": "La inyección de fallos ha causado valores numéricos fuera del rango IEEE 754"
+                },
+                "attempted_prediction": {
+                    "predicted_class": predicted_class,
+                    "confidence": confidence,
+                    "probabilities_with_errors": softmax_errors["nan_count"] + softmax_errors["overflow_count"] + softmax_errors["underflow_count"]
+                },
+                "original_probabilities": original_probabilities
+            }
+            
+            results["final_prediction"] = {
+                "success": False,
+                "error": error_info,
+                "predicted_class": predicted_class,
+                "confidence": confidence,
+                "all_probabilities": all_probabilities
+            }
+        else:
+            results["final_prediction"] = {
+                "success": True,
+                "predicted_class": predicted_class,
+                "confidence": confidence,
+                "all_probabilities": all_probabilities,
+                "original_probabilities": original_probabilities
+            }
         
         # Filtrar archivos None de las listas
         results["excel_files"] = [f for f in results["excel_files"] if f is not None]

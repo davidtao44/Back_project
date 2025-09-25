@@ -27,6 +27,39 @@ import keras
 # Importar inferencia manual
 from fault_injection.manual_inference import ManualInference
 
+def sanitize_for_json(obj):
+    """
+    Recursivamente limpia un objeto para asegurar que sea serializable a JSON.
+    Reemplaza inf, -inf, y NaN con valores válidos.
+    """
+    if isinstance(obj, dict):
+        return {key: sanitize_for_json(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_for_json(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(sanitize_for_json(item) for item in obj)
+    elif isinstance(obj, (int, str, bool)) or obj is None:
+        return obj
+    elif isinstance(obj, float):
+        if np.isnan(obj):
+            return 0.0
+        elif np.isinf(obj):
+            return 1.0 if obj > 0 else 0.0
+        else:
+            return obj
+    elif isinstance(obj, np.ndarray):
+        # Convertir arrays numpy a listas y limpiar
+        return sanitize_for_json(obj.tolist())
+    elif hasattr(obj, '__dict__'):
+        # Para objetos personalizados, convertir a dict
+        return sanitize_for_json(obj.__dict__)
+    else:
+        # Para otros tipos, intentar convertir a string
+        try:
+            return str(obj)
+        except:
+            return "unknown_type"
+
 # Importar módulos de autenticación
 from auth import (
     UserCreate, UserLogin, Token, authenticate_user, create_access_token,
@@ -912,19 +945,40 @@ async def fault_injector_inference(
         excel_filenames = [os.path.basename(f) for f in results["excel_files"] if f]
         image_filenames = [os.path.basename(f) for f in results["image_files"] if f]
         
-        return {
-            "success": True,
-            "session_id": results["session_id"],
-            "predicted_class": results["final_prediction"]["predicted_class"],
-            "confidence": results["final_prediction"]["confidence"],
-            "all_probabilities": results["final_prediction"]["all_probabilities"],
-            "layer_outputs": results["layer_outputs"],
-            "excel_files": excel_filenames,
-            "image_files": image_filenames,
-            "model_used": os.path.basename(model_path),
-            "fault_injection": results["fault_injection"],
-            "message": "Inferencia manual completada exitosamente"
-        }
+        # Verificar si hay errores de overflow/underflow
+        final_prediction = results["final_prediction"]
+        if not final_prediction.get("success", True):
+            # Hay errores numéricos - devolver información detallada del error
+            response_data = {
+                "success": False,
+                "error_type": "numerical_overflow_underflow",
+                "error_details": final_prediction["error"],
+                "session_id": results["session_id"],
+                "layer_outputs": results["layer_outputs"],
+                "excel_files": excel_filenames,
+                "image_files": image_filenames,
+                "model_used": os.path.basename(model_path),
+                "fault_injection": results["fault_injection"],
+                "message": "Error numérico detectado durante la inferencia"
+            }
+        else:
+            # Inferencia exitosa
+            response_data = {
+                "success": True,
+                "session_id": results["session_id"],
+                "predicted_class": final_prediction["predicted_class"],
+                "confidence": final_prediction["confidence"],
+                "all_probabilities": final_prediction["all_probabilities"],
+                "layer_outputs": results["layer_outputs"],
+                "excel_files": excel_filenames,
+                "image_files": image_filenames,
+                "model_used": os.path.basename(model_path),
+                "fault_injection": results["fault_injection"],
+                "message": "Inferencia manual completada exitosamente"
+            }
+        
+        # Sanitizar la respuesta para asegurar compatibilidad con JSON
+        return sanitize_for_json(response_data)
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en la inferencia: {str(e)}")
