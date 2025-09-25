@@ -74,7 +74,9 @@ class WeightFaultInjector:
             
         bits = self.float32_to_bits(value)
         bit_list = list(bits)
-        bit_list[bit_position] = '1' if bit_list[bit_position] == '0' else '0'
+        # Usar la misma convención que BitflipFaultInjector: 0=LSB, 31=MSB
+        bit_index = 31 - bit_position
+        bit_list[bit_index] = '1' if bit_list[bit_index] == '0' else '0'
         modified_bits = ''.join(bit_list)
         
         return self.bits_to_float32(modified_bits)
