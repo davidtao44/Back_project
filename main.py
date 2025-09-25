@@ -932,7 +932,7 @@ async def fault_injector_inference(
 if __name__ == "__main__":
     # Configuración del servidor
     host = "0.0.0.0"  # Esto permite conexiones desde cualquier IP
-    port = int(os.getenv("PORT", 8000))  # Usar variable de entorno PORT para despliegue en la nube
+    port = int(os.getenv("PORT", 8001))  # Usar variable de entorno PORT para despliegue en la nube
 
     print(f"Iniciando servidor en http://{host}:{port}")
     uvicorn.run(app, host=host, port=port)

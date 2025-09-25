@@ -187,6 +187,93 @@ class ManualInference:
         
         return summary
     
+    def diagnose_weight_changes(self) -> Dict[str, Any]:
+        """
+        Diagnosticar cambios en los pesos del modelo para verificar que los fallos se aplicaron.
+        
+        Returns:
+            Diccionario con información detallada sobre los cambios en pesos
+        """
+        diagnosis = {
+            'weight_fault_enabled': self.weight_fault_enabled,
+            'layers_analyzed': [],
+            'weight_differences_found': False,
+            'total_modified_weights': 0,
+            'layer_details': {}
+        }
+        
+        if not self.weight_fault_enabled:
+            diagnosis['message'] = "Inyección de fallos en pesos no está habilitada"
+            return diagnosis
+            
+        # Comparar pesos actuales con originales
+        for i, layer in enumerate(self.model.layers):
+            layer_name = f"{layer.__class__.__name__.lower()}_{i+1}"
+            
+            if not hasattr(layer, 'get_weights') or not layer.get_weights():
+                continue
+                
+            if layer_name not in self.weight_fault_injector.original_weights:
+                continue
+                
+            current_weights = layer.get_weights()
+            original_weights = self.weight_fault_injector.original_weights[layer_name]
+            
+            layer_info = {
+                'layer_name': layer_name,
+                'layer_type': layer.__class__.__name__,
+                'weight_tensors': [],
+                'differences_found': False,
+                'total_differences': 0
+            }
+            
+            # Comparar cada tensor de pesos
+            for idx, (current, original) in enumerate(zip(current_weights, original_weights)):
+                tensor_type = 'kernel' if idx == 0 else 'bias'
+                
+                # Calcular diferencias
+                diff_mask = ~np.isclose(current, original, rtol=1e-9, atol=1e-9)
+                num_differences = np.sum(diff_mask)
+                
+                tensor_info = {
+                    'tensor_index': idx,
+                    'tensor_type': tensor_type,
+                    'shape': current.shape,
+                    'total_elements': current.size,
+                    'modified_elements': int(num_differences),
+                    'modification_percentage': (num_differences / current.size) * 100,
+                    'max_absolute_difference': 0.0,
+                    'modified_positions': []
+                }
+                
+                if num_differences > 0:
+                    layer_info['differences_found'] = True
+                    layer_info['total_differences'] += num_differences
+                    diagnosis['weight_differences_found'] = True
+                    diagnosis['total_modified_weights'] += num_differences
+                    
+                    # Calcular diferencia máxima
+                    abs_diff = np.abs(current - original)
+                    tensor_info['max_absolute_difference'] = float(np.max(abs_diff))
+                    
+                    # Obtener posiciones modificadas (limitado a las primeras 5)
+                    modified_positions = np.where(diff_mask)
+                    for j in range(min(5, num_differences)):
+                        pos = tuple(int(modified_positions[k][j]) for k in range(len(modified_positions)))
+                        tensor_info['modified_positions'].append({
+                            'position': pos,
+                            'original_value': float(original[pos]),
+                            'modified_value': float(current[pos]),
+                            'absolute_difference': float(abs_diff[pos])
+                        })
+                
+                layer_info['weight_tensors'].append(tensor_info)
+            
+            diagnosis['layers_analyzed'].append(layer_name)
+            diagnosis['layer_details'][layer_name] = layer_info
+        
+        return diagnosis
+
     def preprocess_image(self, image_data: bytes) -> np.ndarray:
         """Preprocesar imagen para LeNet-5"""
         # Convertir bytes a imagen PIL
@@ -529,3 +616,86 @@ class ManualInference:
         print(f"Inferencia completada. Archivos Excel: {len(results['excel_files'])}, Imágenes: {len(results['image_files'])}")
         
         return results
+
+    def save_difference_maps(self, feature_maps: np.ndarray, layer_name: str, golden_maps: np.ndarray = None) -> List[str]:
+        """
+        Generar y guardar mapas de diferencias entre salidas golden y con fallos.
+        
+        Args:
+            feature_maps: Mapas de características actuales (con fallos)
+            layer_name: Nombre de la capa
+            golden_maps: Mapas de características golden (sin fallos)
+            
+        Returns:
+            Lista de rutas de archivos de diferencias generados
+        """
+        if golden_maps is None:
+            print(f"⚠️ No hay mapas golden para comparar en {layer_name}")
+            return []
+            
+        if feature_maps.shape != golden_maps.shape:
+            print(f"⚠️ Las formas no coinciden para {layer_name}: {feature_maps.shape} vs {golden_maps.shape}")
+            return []
+            
+        difference_files = []
+        
+        try:
+            if len(feature_maps.shape) == 3:  # Mapas 2D con canales
+                num_channels = feature_maps.shape[-1]
+                
+                for i in range(min(num_channels, 10)):  # Limitar a 10 canales
+                    # Calcular diferencia absoluta
+                    diff_map = np.abs(feature_maps[:, :, i] - golden_maps[:, :, i])
+                    
+                    # Verificar si hay diferencias significativas
+                    max_diff = np.max(diff_map)
+                    mean_diff = np.mean(diff_map)
+                    
+                    if max_diff > 1e-6:  # Solo guardar si hay diferencias significativas
+                        # Normalizar para visualización
+                        if max_diff > 0:
+                            normalized_diff = (diff_map / max_diff * 255).astype(np.uint8)
+                        else:
+                            normalized_diff = np.zeros_like(diff_map, dtype=np.uint8)
+                        
+                        # Guardar imagen de diferencia
+                        diff_path = os.path.join(self.output_dir, f"{layer_name}_diferencia_canal_{i+1}.png")
+                        success = cv2.imwrite(diff_path, normalized_diff)
+                        
+                        if success:
+                            difference_files.append(diff_path)
+                            print(f"📊 Mapa de diferencia guardado: {diff_path}")
+                            print(f"   Diferencia máxima: {max_diff:.8f}, Diferencia promedio: {mean_diff:.8f}")
+                        
+                        # Guardar datos numéricos de diferencia
+                        excel_diff_path = os.path.join(self.output_dir, f"{layer_name}_diferencia_canal_{i+1}.xlsx")
+                        df_diff = pd.DataFrame(diff_map)
+                        df_diff.to_excel(excel_diff_path, index=False, header=False)
+                        difference_files.append(excel_diff_path)
+                    else:
+                        print(f"ℹ️ No hay diferencias significativas en {layer_name} canal {i+1}")
+                        
+            elif len(feature_maps.shape) == 1:  # Vector 1D
+                diff_vector = np.abs(feature_maps - golden_maps)
+                max_diff = np.max(diff_vector)
+                mean_diff = np.mean(diff_vector)
+                
+                if max_diff > 1e-6:
+                    # Guardar diferencias como Excel
+                    diff_path = os.path.join(self.output_dir, f"{layer_name}_diferencias.xlsx")
+                    df_diff = pd.DataFrame({
+                        'Golden': golden_maps,
+                        'Con_Fallos': feature_maps,
+                        'Diferencia_Absoluta': diff_vector
+                    })
+                    df_diff.to_excel(diff_path, index=True)
+                    difference_files.append(diff_path)
+                    print(f"📊 Diferencias guardadas: {diff_path}")
+                    print(f"   Diferencia máxima: {max_diff:.8f}, Diferencia promedio: {mean_diff:.8f}")
+                else:
+                    print(f"ℹ️ No hay diferencias significativas en {layer_name}")
+                    
+        except Exception as e:
+            print(f"❌ Error al generar mapas de diferencia para {layer_name}: {str(e)}")
+            
+        return difference_files

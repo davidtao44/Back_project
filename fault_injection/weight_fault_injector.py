@@ -108,7 +108,6 @@ class WeightFaultInjector:
             weights = layer.get_weights()
             target_type = config.get('target_type', 'kernel')
             positions = config.get('positions', [])
-            bit_positions = config.get('bit_positions', [15])
             
             # Determinar qué tensor de pesos modificar
             weight_idx = self._get_weight_index(target_type, weights)
@@ -120,37 +119,46 @@ class WeightFaultInjector:
             print(f"✅ Modificando {target_type} en {layer_name}, forma: {target_weights.shape}")
             
             # Inyectar fallos en posiciones específicas
-            for pos_idx, position in enumerate(positions):
+            for pos_config in positions:
+                # Manejar tanto el formato nuevo como el legacy
+                if isinstance(pos_config, dict):
+                    # Formato nuevo: {'position': [0, 0, 0, 0], 'bit_positions': [20, 21, ...]}
+                    position = tuple(pos_config['position'])
+                    bit_positions_for_pos = pos_config.get('bit_positions', [15])
+                else:
+                    # Formato legacy: posición directa
+                    position = tuple(pos_config)
+                    bit_positions_for_pos = config.get('bit_positions', [15])
+                
                 if not self._is_valid_position(target_weights.shape, position):
                     print(f"⚠️ Posición inválida {position} para forma {target_weights.shape}")
                     continue
-                    
-                # Seleccionar bit position
-                bit_pos = bit_positions[pos_idx % len(bit_positions)]
                 
-                # Obtener valor original
+                # Obtener valor original una sola vez
                 original_value = target_weights[position]
+                current_value = original_value
                 
-                # Inyectar bitflip
-                modified_value = self.inject_bitflip(original_value, bit_pos)
+                # Inyectar fallos en todos los bits especificados para esta posición
+                for bit_pos in bit_positions_for_pos:
+                    # Inyectar bitflip en el valor actual
+                    current_value = self.inject_bitflip(current_value, bit_pos)
+                    
+                    # Registrar fallo
+                    fault_info = {
+                        'layer_name': layer_name,
+                        'target_type': target_type,
+                        'position': tuple(int(x) for x in position),
+                        'bit_position': int(bit_pos),
+                        'original_value': float(original_value),
+                        'modified_value': float(current_value),
+                        'fault_type': 'weight_specific'
+                    }
+                    injected_faults.append(fault_info)
                 
-                # Aplicar modificación
-                target_weights[position] = modified_value
-                
-                # Registrar fallo
-                fault_info = {
-                    'layer_name': layer_name,
-                    'target_type': target_type,
-                    'position': tuple(int(x) for x in position),
-                    'bit_position': int(bit_pos),
-                    'original_value': float(original_value),
-                    'modified_value': float(modified_value),
-                    'fault_type': 'weight_specific'
-                }
-                
-                injected_faults.append(fault_info)
-                print(f"✅ Fallo inyectado en {layer_name}.{target_type}[{position}] bit {bit_pos}")
-                print(f"   Valor: {original_value:.6f} → {modified_value:.6f}")
+                # Aplicar el valor final modificado
+                target_weights[position] = current_value
+                print(f"✅ Fallo inyectado en {layer_name}.{target_type}[{position}] bits {bit_positions_for_pos}")
+                print(f"   Valor: {original_value:.6f} → {current_value:.6f}")
             
             # Actualizar pesos en el modelo
             weights[weight_idx] = target_weights
