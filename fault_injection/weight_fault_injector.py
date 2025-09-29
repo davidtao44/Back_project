@@ -24,7 +24,10 @@ class WeightFaultInjector:
                 - target_type: 'kernel', 'bias', 'weights'
                 - positions: Lista de posiciones específicas [(i, j, k, ...)]
                 - bit_positions: Lista de posiciones de bits a afectar
-                - fault_type: 'specific' para posiciones exactas
+                - fault_type: Tipo de fallo a inyectar:
+                    * 'bitflip': Invierte el bit (0→1, 1→0) [por defecto]
+                    * 'stuck_at_0': Fuerza el bit a 0
+                    * 'stuck_at_1': Fuerza el bit a 1
         """
         print(f"🔧 DEBUG WeightFaultInjector: Configurando fallos para capa {layer_name}")
         print(f"🔧 DEBUG WeightFaultInjector: Parámetros: {fault_params}")
@@ -77,6 +80,34 @@ class WeightFaultInjector:
         # Usar la misma convención que BitflipFaultInjector: 0=LSB, 31=MSB
         bit_index = 31 - bit_position
         bit_list[bit_index] = '1' if bit_list[bit_index] == '0' else '0'
+        modified_bits = ''.join(bit_list)
+        
+        return self.bits_to_float32(modified_bits)
+    
+    def inject_stuck_at_0(self, value: float, bit_position: int) -> float:
+        """Inyectar un fallo stuck-at-0 en una posición específica."""
+        if not (0 <= bit_position <= 31):
+            return value
+            
+        bits = self.float32_to_bits(value)
+        bit_list = list(bits)
+        # Usar la misma convención que BitflipFaultInjector: 0=LSB, 31=MSB
+        bit_index = 31 - bit_position
+        bit_list[bit_index] = '0'  # Forzar el bit a 0
+        modified_bits = ''.join(bit_list)
+        
+        return self.bits_to_float32(modified_bits)
+    
+    def inject_stuck_at_1(self, value: float, bit_position: int) -> float:
+        """Inyectar un fallo stuck-at-1 en una posición específica."""
+        if not (0 <= bit_position <= 31):
+            return value
+            
+        bits = self.float32_to_bits(value)
+        bit_list = list(bits)
+        # Usar la misma convención que BitflipFaultInjector: 0=LSB, 31=MSB
+        bit_index = 31 - bit_position
+        bit_list[bit_index] = '1'  # Forzar el bit a 1
         modified_bits = ''.join(bit_list)
         
         return self.bits_to_float32(modified_bits)
@@ -140,10 +171,18 @@ class WeightFaultInjector:
                 original_value = target_weights[position]
                 current_value = original_value
                 
+                # Obtener tipo de fallo (por defecto bitflip)
+                fault_type = config.get('fault_type', 'bitflip')
+                
                 # Inyectar fallos en todos los bits especificados para esta posición
                 for bit_pos in bit_positions_for_pos:
-                    # Inyectar bitflip en el valor actual
-                    current_value = self.inject_bitflip(current_value, bit_pos)
+                    # Aplicar el tipo de fallo correspondiente
+                    if fault_type == 'stuck_at_0':
+                        current_value = self.inject_stuck_at_0(current_value, bit_pos)
+                    elif fault_type == 'stuck_at_1':
+                        current_value = self.inject_stuck_at_1(current_value, bit_pos)
+                    else:  # bitflip por defecto
+                        current_value = self.inject_bitflip(current_value, bit_pos)
                     
                     # Registrar fallo
                     fault_info = {
@@ -153,7 +192,7 @@ class WeightFaultInjector:
                         'bit_position': int(bit_pos),
                         'original_value': float(original_value),
                         'modified_value': float(current_value),
-                        'fault_type': 'weight_specific'
+                        'fault_type': f'weight_{fault_type}'
                     }
                     injected_faults.append(fault_info)
                 
