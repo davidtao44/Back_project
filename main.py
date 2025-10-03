@@ -1134,104 +1134,166 @@ async def inject_vhdl_faults(
             f.write(modified_content)
         print("✅ Archivo VHDL modificado guardado")
 
-        # Ejecutar simulación
-        simulation_script = "/home/davidgonzalez/Documentos/David_2025/4_CONV1_SAB_STUCKAT_DEC_RAM_TB/CONV1_SAB_STUCKAT_DEC_RAM.sim/sim_1/behav/xsim/simulate.sh"
+        # Ejecutar secuencia completa de simulación: compile → elaborate → simulate
+        base_dir = "/home/davidgonzalez/Documentos/David_2025/4_CONV1_SAB_STUCKAT_DEC_RAM_TB/CONV1_SAB_STUCKAT_DEC_RAM.sim/sim_1/behav/xsim"
+        compile_script = os.path.join(base_dir, "compile.sh")
+        elaborate_script = os.path.join(base_dir, "elaborate.sh")
+        simulation_script = os.path.join(base_dir, "simulate.sh")
+        
         simulation_results = {}
         csv_processing_results = {}
         
-        if os.path.exists(simulation_script):
-            print(f"🔍 Ejecutando simulación: {simulation_script}")
+        # Verificar que todos los scripts existen
+        print(f"🔍 Verificando existencia de scripts en: {base_dir}")
+        print(f"   - compile.sh: {'✅' if os.path.exists(compile_script) else '❌'} {compile_script}")
+        print(f"   - elaborate.sh: {'✅' if os.path.exists(elaborate_script) else '❌'} {elaborate_script}")
+        print(f"   - simulate.sh: {'✅' if os.path.exists(simulation_script) else '❌'} {simulation_script}")
+        
+        if os.path.exists(compile_script) and os.path.exists(elaborate_script) and os.path.exists(simulation_script):
             try:
                 # Cambiar al directorio de simulación
-                sim_dir = os.path.dirname(simulation_script)
+                sim_dir = base_dir
                 
-                # Ejecutar simulación con timeout
-                result = subprocess.run(
-                    ["bash", simulation_script],
+                # 1. Ejecutar compile.sh
+                print("🔧 Ejecutando compile.sh...")
+                compile_result = subprocess.run(
+                    ["bash", compile_script],
                     cwd=sim_dir,
                     capture_output=True,
                     text=True,
-                    timeout=600  # 10 minutos de timeout
+                    timeout=300  # 5 minutos de timeout
                 )
                 
-                if result.returncode == 0:
-                    print("✅ Simulación ejecutada exitosamente")
-                    simulation_results = {
-                        "status": "success",
-                        "message": "Simulación completada exitosamente",
-                        "output": result.stdout[-1000:] if result.stdout else "",  # Últimos 1000 caracteres
-                        "errors": result.stderr[-500:] if result.stderr else ""    # Últimos 500 caracteres de errores
-                    }
-                    
-                    # Procesar archivos CSV después de la simulación exitosa
-                    print("🔍 Buscando archivos CSV para procesar...")
-                    csv_files = []
-                    for file in os.listdir(sim_dir):
-                        if file.endswith('.csv') and 'Conv1' in file:
-                            csv_files.append(os.path.join(sim_dir, file))
-                    
-                    if csv_files:
-                        print(f"✅ Encontrados {len(csv_files)} archivos CSV para procesar")
-                        # Importar el procesador CSV
-                        from vhdl_hardware.csv_processor import CSVProcessor
-                        
-                        csv_processor = CSVProcessor()
-                        processed_results = []
-                        
-                        for csv_file in csv_files:
-                            try:
-                                print(f"🔄 Procesando archivo CSV: {csv_file}")
-                                result = csv_processor.process_simulation_csv(csv_file)
-                                processed_results.append({
-                                    "file": csv_file,
-                                    "result": result
-                                })
-                                print(f"✅ Archivo CSV procesado exitosamente: {csv_file}")
-                            except Exception as csv_error:
-                                print(f"❌ Error procesando CSV {csv_file}: {str(csv_error)}")
-                                processed_results.append({
-                                    "file": csv_file,
-                                    "error": str(csv_error)
-                                })
-                        
-                        csv_processing_results = {
-                            "status": "success",
-                            "processed_files": len(processed_results),
-                            "results": processed_results
-                        }
-                    else:
-                        print("⚠️ No se encontraron archivos CSV para procesar")
-                        csv_processing_results = {
-                            "status": "warning",
-                            "message": "No se encontraron archivos CSV para procesar"
-                        }
-                        
-                else:
-                    print(f"❌ ERROR en simulación (código: {result.returncode})")
+                if compile_result.returncode != 0:
+                    print(f"❌ ERROR en compile.sh (código: {compile_result.returncode})")
                     simulation_results = {
                         "status": "error",
-                        "message": f"Simulación falló con código {result.returncode}",
-                        "output": result.stdout[-1000:] if result.stdout else "",
-                        "errors": result.stderr[-500:] if result.stderr else ""
+                        "message": f"Compilación falló con código {compile_result.returncode}",
+                        "step": "compile",
+                        "output": compile_result.stdout[-1000:] if compile_result.stdout else "",
+                        "errors": compile_result.stderr[-500:] if compile_result.stderr else ""
                     }
+                else:
+                    print("✅ compile.sh ejecutado exitosamente")
                     
-            except subprocess.TimeoutExpired:
-                print("❌ ERROR: Simulación excedió tiempo límite")
+                    # 2. Ejecutar elaborate.sh
+                    print("🔧 Ejecutando elaborate.sh...")
+                    elaborate_result = subprocess.run(
+                        ["bash", elaborate_script],
+                        cwd=sim_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=300  # 5 minutos de timeout
+                    )
+                    
+                    if elaborate_result.returncode != 0:
+                        print(f"❌ ERROR en elaborate.sh (código: {elaborate_result.returncode})")
+                        simulation_results = {
+                            "status": "error",
+                            "message": f"Elaboración falló con código {elaborate_result.returncode}",
+                            "step": "elaborate",
+                            "output": elaborate_result.stdout[-1000:] if elaborate_result.stdout else "",
+                            "errors": elaborate_result.stderr[-500:] if elaborate_result.stderr else ""
+                        }
+                    else:
+                        print("✅ elaborate.sh ejecutado exitosamente")
+                        
+                        # 3. Ejecutar simulate.sh
+                        print("🔧 Ejecutando simulate.sh...")
+                        simulate_result = subprocess.run(
+                            ["bash", simulation_script],
+                            cwd=sim_dir,
+                            capture_output=True,
+                            text=True,
+                            timeout=600  # 10 minutos de timeout
+                        )
+                        
+                        if simulate_result.returncode == 0:
+                            print("✅ Simulación ejecutada exitosamente")
+                            simulation_results = {
+                                "status": "success",
+                                "message": "Secuencia completa de simulación completada exitosamente",
+                                "steps_completed": ["compile", "elaborate", "simulate"],
+                                "output": simulate_result.stdout[-1000:] if simulate_result.stdout else "",
+                                "errors": simulate_result.stderr[-500:] if simulate_result.stderr else ""
+                            }
+                            
+                            # Procesar archivos CSV después de la simulación exitosa
+                            print("🔍 Buscando archivos CSV para procesar...")
+                            csv_files = []
+                            for file in os.listdir(sim_dir):
+                                if file.endswith('.csv') and 'Conv1' in file:
+                                    csv_files.append(os.path.join(sim_dir, file))
+                            
+                            if csv_files:
+                                print(f"✅ Encontrados {len(csv_files)} archivos CSV para procesar")
+                                # Importar el procesador CSV
+                                from vhdl_hardware.csv_processor import CSVProcessor
+                                
+                                csv_processor = CSVProcessor()
+                                processed_results = []
+                                
+                                for csv_file in csv_files:
+                                    try:
+                                        print(f"🔄 Procesando archivo CSV: {csv_file}")
+                                        result = csv_processor.process_simulation_csv(csv_file)
+                                        processed_results.append({
+                                            "file": csv_file,
+                                            "result": result
+                                        })
+                                        print(f"✅ Archivo CSV procesado exitosamente: {csv_file}")
+                                    except Exception as csv_error:
+                                        print(f"❌ Error procesando CSV {csv_file}: {str(csv_error)}")
+                                        processed_results.append({
+                                            "file": csv_file,
+                                            "error": str(csv_error)
+                                        })
+                                
+                                csv_processing_results = {
+                                    "status": "success",
+                                    "processed_files": len(processed_results),
+                                    "results": processed_results
+                                }
+                            else:
+                                print("⚠️ No se encontraron archivos CSV para procesar")
+                                csv_processing_results = {
+                                    "status": "warning",
+                                    "message": "No se encontraron archivos CSV para procesar"
+                                }
+                        else:
+                            print(f"❌ ERROR en simulate.sh (código: {simulate_result.returncode})")
+                            simulation_results = {
+                                "status": "error",
+                                "message": f"Simulación falló con código {simulate_result.returncode}",
+                                "step": "simulate",
+                                "steps_completed": ["compile", "elaborate"],
+                                "output": simulate_result.stdout[-1000:] if simulate_result.stdout else "",
+                                "errors": simulate_result.stderr[-500:] if simulate_result.stderr else ""
+                            }
+                    
+            except subprocess.TimeoutExpired as timeout_error:
+                print(f"❌ ERROR: Proceso excedió tiempo límite: {str(timeout_error)}")
                 simulation_results = {
                     "status": "timeout",
-                    "message": "La simulación excedió el tiempo límite de 10 minutos"
+                    "message": f"El proceso excedió el tiempo límite: {str(timeout_error)}"
                 }
             except Exception as sim_error:
-                print(f"❌ ERROR en simulación: {str(sim_error)}")
+                print(f"❌ ERROR en secuencia de simulación: {str(sim_error)}")
                 simulation_results = {
                     "status": "error",
-                    "message": f"Error ejecutando simulación: {str(sim_error)}"
+                    "message": f"Error ejecutando secuencia de simulación: {str(sim_error)}"
                 }
         else:
-            print(f"❌ Script de simulación no encontrado: {simulation_script}")
+            print(f"❌ Scripts de simulación no encontrados en: {base_dir}")
+            
             simulation_results = {
                 "status": "error",
-                "message": f"Script de simulación no encontrado: {simulation_script}"
+                "message": f"Scripts de simulación no encontrados en: {base_dir}",
+                "missing_scripts": {
+                    "compile.sh": not os.path.exists(compile_script),
+                    "elaborate.sh": not os.path.exists(elaborate_script),
+                    "simulate.sh": not os.path.exists(simulation_script)
+                }
             }
         
         # Preparar respuesta
@@ -1467,199 +1529,7 @@ def apply_bit_faults(binary_string: str, bit_positions: list, fault_type: str = 
     
     return ''.join(bits)
 
-@app.post("/modify_vhdl_weights/")
-async def modify_vhdl_weights(
-    filter_faults: str = Body(None),
-    bias_faults: str = Body(None),
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Modifica los pesos y bias en el archivo VHDL según la configuración de fallos.
-    """
-    try:
-        print(f"🔍 DEBUG: Recibido filter_faults: {filter_faults}")
-        print(f"🔍 DEBUG: Recibido bias_faults: {bias_faults}")
-        
-        # Ruta del archivo VHDL
-        vhdl_file_path = "/home/davidgonzalez/Documentos/David_2025/4_CONV1_SAB_STUCKAT_DEC_RAM_TB/CONV1_SAB_STUCKAT_DEC_RAM.srcs/sources_1/new/CONV1_SAB_STUCK_DECOS.vhd"
-        
-        # Verificar que el archivo existe
-        if not os.path.exists(vhdl_file_path):
-            raise HTTPException(status_code=404, detail=f"Archivo VHDL no encontrado: {vhdl_file_path}")
-        
-        # Parsear configuraciones de fallos
-        try:
-            print(f"🔍 DEBUG: Parseando filter_faults: {filter_faults}")
-            filter_config = json.loads(filter_faults) if filter_faults else {}
-            print(f"🔍 DEBUG: Parseando bias_faults: {bias_faults}")
-            bias_config = json.loads(bias_faults) if bias_faults else {}
-            print(f"✅ Configuraciones parseadas - filter: {filter_config}, bias: {bias_config}")
-        except json.JSONDecodeError as e:
-            print(f"❌ ERROR: Error parseando JSON: {str(e)}")
-            raise HTTPException(status_code=400, detail=f"Error parseando configuración JSON: {str(e)}")
-        
-        # Crear directorio temporal para respaldo
-        temp_dir = f"/tmp/vhdl_backup_{uuid.uuid4()}"
-        os.makedirs(temp_dir, exist_ok=True)
-        print(f"✅ Directorio temporal creado: {temp_dir}")
-        
-        # Crear respaldo del archivo original
-        backup_path = os.path.join(temp_dir, "CONV1_SAB_STUCK_DECOS_backup.vhd")
-        shutil.copy2(vhdl_file_path, backup_path)
-        print(f"✅ Respaldo creado: {backup_path}")
-        
-        # Modificar pesos en el archivo VHDL
-        modification_results = {}
-        try:
-            print("🔄 Iniciando modificación de pesos...")
-            # Leer el archivo VHDL
-            with open(vhdl_file_path, 'r') as file:
-                content = file.read()
-            
-            # Crear configuración combinada
-            fault_config = {
-                'filter_faults': filter_config,
-                'bias_faults': bias_config
-            }
-            
-            # Implementar modificación real de pesos y bias en el archivo VHDL
-            modified_content = modify_vhdl_weights_and_bias(content, fault_config)
-            
-            # Escribir archivo modificado
-            with open(vhdl_file_path, 'w') as file:
-                file.write(modified_content)
-            
-            modification_results = {
-                "status": "success",
-                "filter_faults_applied": filter_config,
-                "bias_faults_applied": bias_config,
-                "backup_created": backup_path
-            }
-            print("✅ Modificación de pesos completada")
-            
-        except Exception as mod_error:
-            print(f"❌ ERROR en modificación: {str(mod_error)}")
-            # Restaurar archivo original en caso de error
-            shutil.copy2(backup_path, vhdl_file_path)
-            raise HTTPException(status_code=500, detail=f"Error modificando archivo VHDL: {str(mod_error)}")
-        
-        # Ejecutar script de simulación
-        simulation_script = "/home/davidgonzalez/Documentos/David_2025/4_CONV1_SAB_STUCKAT_DEC_RAM_TB/CONV1_SAB_STUCKAT_DEC_RAM.sim/sim_1/behav/xsim/simulate.sh"
-        simulation_results = {}
-        print(f"🔍 DEBUG: Verificando script de simulación: {simulation_script}")
-        
-        if os.path.exists(simulation_script):
-            print("✅ Script de simulación encontrado, ejecutando...")
-            try:
-                # Ejecutar el script de simulación con timeout de 10 minutos
-                simulation_process = subprocess.run(
-                    ["bash", simulation_script],
-                    cwd=os.path.dirname(simulation_script),
-                    capture_output=True,
-                    text=True,
-                    timeout=600  # 10 minutos
-                )
-                
-                simulation_results = {
-                    "status": "completed",
-                    "return_code": simulation_process.returncode,
-                    "stdout": simulation_process.stdout[:1000] if simulation_process.stdout else "",  # Limitar output
-                    "stderr": simulation_process.stderr[:1000] if simulation_process.stderr else "",  # Limitar output
-                    "script_path": simulation_script
-                }
-                print(f"✅ Simulación completada con código: {simulation_process.returncode}")
-                
-                # Buscar archivos Excel y CSV generados
-                result_files = []
-                simulation_dir = os.path.dirname(simulation_script)
-                for root, dirs, files in os.walk(simulation_dir):
-                    for file in files:
-                        if file.endswith(('.xlsx', '.xls', '.csv')):
-                            result_files.append(os.path.join(root, file))
-                
-                simulation_results["result_files"] = result_files
-                simulation_results["excel_files"] = [f for f in result_files if f.endswith(('.xlsx', '.xls'))]  # Mantener compatibilidad
-                simulation_results["csv_files"] = [f for f in result_files if f.endswith('.csv')]
-                print(f"📊 Archivos de resultados encontrados: {len(result_files)} (Excel: {len(simulation_results['excel_files'])}, CSV: {len(simulation_results['csv_files'])})")
-                
-                # Procesar archivos CSV después de la simulación exitosa
-                csv_processing_results = {}
-                csv_files = [f for f in result_files if f.endswith('.csv') and 'Conv1' in f]
-                
-                if csv_files:
-                    print(f"✅ Encontrados {len(csv_files)} archivos CSV para procesar")
-                    # Importar el procesador CSV
-                    from vhdl_hardware.csv_processor import CSVProcessor
-                    
-                    csv_processor = CSVProcessor()
-                    processed_results = []
-                    
-                    for csv_file in csv_files:
-                        try:
-                            print(f"🔄 Procesando archivo CSV: {csv_file}")
-                            result = csv_processor.process_simulation_csv(csv_file)
-                            processed_results.append({
-                                "file": csv_file,
-                                "result": result
-                            })
-                            print(f"✅ Archivo CSV procesado exitosamente: {csv_file}")
-                        except Exception as csv_error:
-                            print(f"❌ Error procesando CSV {csv_file}: {str(csv_error)}")
-                            processed_results.append({
-                                "file": csv_file,
-                                "error": str(csv_error)
-                            })
-                    
-                    csv_processing_results = {
-                        "status": "success",
-                        "processed_files": len(processed_results),
-                        "results": processed_results
-                    }
-                    simulation_results["csv_processing_results"] = csv_processing_results
-                else:
-                    print("⚠️ No se encontraron archivos CSV para procesar")
-                    simulation_results["csv_processing_results"] = {
-                        "status": "warning",
-                        "message": "No se encontraron archivos CSV para procesar"
-                    }
-                
-            except subprocess.TimeoutExpired:
-                print("⏰ Simulación excedió tiempo límite")
-                simulation_results = {
-                    "status": "timeout",
-                    "message": "La simulación excedió el tiempo límite de 10 minutos"
-                }
-            except Exception as sim_error:
-                print(f"❌ ERROR en simulación: {str(sim_error)}")
-                simulation_results = {
-                    "status": "error",
-                    "message": f"Error ejecutando simulación: {str(sim_error)}"
-                }
-        else:
-            print(f"❌ Script de simulación no encontrado: {simulation_script}")
-            simulation_results = {
-                "status": "error",
-                "message": f"Script de simulación no encontrado: {simulation_script}"
-            }
-        
-        # Preparar respuesta
-        response_data = {
-            "status": "success",
-            "modification_results": modification_results,
-            "simulation_results": simulation_results,
-            "vhdl_file": vhdl_file_path,
-            "backup_file": backup_path,
-            "message": "Modificación de pesos y simulación completada"
-        }
-        
-        print("✅ Respuesta preparada exitosamente")
-        return sanitize_for_json(response_data)
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ ERROR general: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error en el proceso: {str(e)}")
+
 
 if __name__ == "__main__":
     # Configuración del servidor
