@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Body, Depends, status, UploadFile, File
+from fastapi import FastAPI, HTTPException, Body, Depends, status, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel  # Añadir esta línea
@@ -14,6 +14,8 @@ import numpy as np
 from datetime import timedelta
 import shutil
 import uuid
+import json
+import subprocess
 
 # Importar desde nuestros módulos
 from models import ImageToVHDLRequest, FaultInjectorRequest, FaultInjectorInferenceRequest, FaultInjectionConfig
@@ -26,6 +28,11 @@ import keras
 
 # Importar inferencia manual
 from fault_injection.manual_inference import ManualInference
+
+# Importar módulos de hardware VHDL
+from vhdl_hardware.hardware_fault_injector import HardwareFaultInjector
+from vhdl_hardware.vhdl_weight_modifier import VHDLWeightModifier
+from vhdl_hardware.vivado_controller import VivadoController
 
 def sanitize_for_json(obj):
     """
@@ -104,14 +111,15 @@ def read_root():
 
 # Endpoints de autenticación
 @app.post("/auth/register", response_model=dict)
-def register(user: UserCreate):
+def register(user: UserCreate, current_user: dict = Depends(get_current_user)):
     """Registrar nuevo usuario"""
     try:
         new_user = create_user(user)
         return {
             "success": True,
             "message": "Usuario creado exitosamente",
-            "user": new_user
+            "user": new_user,
+            "created_by": current_user.get("username", current_user.get("email", "unknown"))
         }
     except HTTPException as e:
         raise e
@@ -314,8 +322,8 @@ def verify_token_endpoint(current_user: dict = Depends(get_current_user)):
     }
 
 @app.get("/models/")
-def get_models():
-    """Endpoint para obtener la lista de modelos disponibles"""
+def get_models(current_user: dict = Depends(get_current_user)):
+    """Endpoint para obtener la lista de modelos disponibles - Requiere autenticación"""
     try:
         models_dir = "models"
         if not os.path.exists(models_dir):
@@ -368,9 +376,9 @@ def get_models():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/list_models/")
-def list_models():
-    """Endpoint legacy para compatibilidad"""
-    return get_models()
+def list_models(current_user: dict = Depends(get_current_user)):
+    """Endpoint legacy para compatibilidad - Requiere autenticación"""
+    return get_models(current_user)
 
 @app.post("/upload_model/")
 async def upload_model(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
@@ -982,6 +990,676 @@ async def fault_injector_inference(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en la inferencia: {str(e)}")
+
+# ==================== ENDPOINTS DE VHDL HARDWARE ====================
+
+@app.get("/vhdl/supported_faults/")
+def get_supported_faults():
+    """
+    Obtiene información sobre los tipos de fallos soportados para inyección en hardware VHDL
+    """
+    try:
+        # Estructura que espera el frontend
+        supported_faults = {
+            "filter_targets": [
+                {"name": "filter_0", "description": "Filtro 0 - Primera capa convolucional"},
+                {"name": "filter_1", "description": "Filtro 1 - Primera capa convolucional"},
+                {"name": "filter_2", "description": "Filtro 2 - Primera capa convolucional"},
+                {"name": "filter_3", "description": "Filtro 3 - Primera capa convolucional"},
+                {"name": "filter_4", "description": "Filtro 4 - Primera capa convolucional"},
+                {"name": "filter_5", "description": "Filtro 5 - Primera capa convolucional"}
+            ],
+            "bias_targets": [
+                {"name": "bias_0", "description": "Sesgo 0 - Primera capa convolucional"},
+                {"name": "bias_1", "description": "Sesgo 1 - Primera capa convolucional"},
+                {"name": "bias_2", "description": "Sesgo 2 - Primera capa convolucional"},
+                {"name": "bias_3", "description": "Sesgo 3 - Primera capa convolucional"},
+                {"name": "bias_4", "description": "Sesgo 4 - Primera capa convolucional"},
+                {"name": "bias_5", "description": "Sesgo 5 - Primera capa convolucional"}
+            ],
+            "fault_types": [
+                {"name": "stuck_at_0", "description": "Forzar bit a valor 0"},
+                {"name": "stuck_at_1", "description": "Forzar bit a valor 1"}
+            ]
+        }
+        
+        return supported_faults
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener fallos soportados: {str(e)}")
+
+@app.get("/vhdl/validate_vivado/")
+def validate_vivado_installation(vivado_path: str = None):
+    """
+    Valida si Vivado está instalado y accesible en la ruta especificada
+    """
+    try:
+        vivado_controller = VivadoController(vivado_path or "vivado")
+        is_valid = vivado_controller.verify_vivado_installation()
+        
+        return {
+            "status": "success",
+            "vivado_valid": is_valid,
+            "vivado_path": vivado_path or "default",
+            "message": "Validación de Vivado completada" if is_valid else "Vivado no encontrado o no válido"
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "vivado_valid": False,
+            "vivado_path": vivado_path or "default",
+            "message": f"Error al validar Vivado: {str(e)}"
+        }
+
+
+
+@app.post("/vhdl/inject_faults/")
+async def inject_vhdl_faults(
+    filter_faults: str = Form(...),
+    bias_faults: str = Form(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Endpoint simplificado para modificar pesos en archivo VHDL específico y ejecutar simulación
+    """
+    print(f"🔍 DEBUG: Recibidos parámetros - filter_faults: {filter_faults}, bias_faults: {bias_faults}")
+    print(f"🔍 DEBUG: Usuario actual: {current_user}")
+    
+    try:
+        # Archivo VHDL fijo
+        vhdl_file_path = "/home/davidgonzalez/Documentos/David_2025/4_CONV1_SAB_STUCKAT_DEC_RAM_TB/CONV1_SAB_STUCKAT_DEC_RAM.srcs/sources_1/new/CONV1_SAB_STUCK_DECOS.vhd"
+        print(f"🔍 DEBUG: Verificando archivo VHDL: {vhdl_file_path}")
+        
+        # Validar que el archivo existe
+        if not os.path.exists(vhdl_file_path):
+            print(f"❌ ERROR: Archivo VHDL no encontrado: {vhdl_file_path}")
+            raise HTTPException(status_code=404, detail=f"Archivo VHDL no encontrado: {vhdl_file_path}")
+        
+        print("✅ Archivo VHDL encontrado")
+        
+        # Parsear configuraciones de fallos
+        try:
+            print(f"🔍 DEBUG: Parseando filter_faults: {filter_faults}")
+            filter_config = json.loads(filter_faults) if filter_faults else {}
+            print(f"🔍 DEBUG: Parseando bias_faults: {bias_faults}")
+            bias_config = json.loads(bias_faults) if bias_faults else {}
+            print(f"✅ Configuraciones parseadas - filter: {filter_config}, bias: {bias_config}")
+        except json.JSONDecodeError as e:
+            print(f"❌ ERROR: Error parseando JSON: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Error parseando configuración JSON: {str(e)}")
+        
+        # Crear directorio temporal para respaldo
+        temp_dir = f"/tmp/vhdl_backup_{uuid.uuid4()}"
+        os.makedirs(temp_dir, exist_ok=True)
+        print(f"✅ Directorio temporal creado: {temp_dir}")
+        
+        # Crear respaldo del archivo original
+        backup_path = os.path.join(temp_dir, "CONV1_SAB_STUCK_DECOS_backup.vhd")
+        shutil.copy2(vhdl_file_path, backup_path)
+        print(f"✅ Respaldo creado: {backup_path}")
+
+        # Leer contenido del archivo VHDL
+        with open(vhdl_file_path, 'r', encoding='utf-8') as f:
+            vhdl_content = f.read()
+        print("✅ Contenido del archivo VHDL leído")
+
+        # Preparar configuración de fallos
+        fault_config = {
+            'filter_faults': filter_config,
+            'bias_faults': bias_config
+        }
+
+        # Modificar el contenido del archivo VHDL
+        try:
+            modified_content = modify_vhdl_weights_and_bias(vhdl_content, fault_config)
+            print("✅ Contenido del archivo VHDL modificado")
+            
+            modification_results = {
+                "status": "success",
+                "message": "Pesos y bias modificados correctamente",
+                "filter_modifications": len(filter_config),
+                "bias_modifications": len(bias_config)
+            }
+        except Exception as mod_error:
+            print(f"❌ ERROR modificando VHDL: {str(mod_error)}")
+            modification_results = {
+                "status": "error",
+                "message": f"Error modificando VHDL: {str(mod_error)}"
+            }
+            modified_content = vhdl_content  # Usar contenido original si falla
+
+        # Escribir el archivo modificado
+        with open(vhdl_file_path, 'w', encoding='utf-8') as f:
+            f.write(modified_content)
+        print("✅ Archivo VHDL modificado guardado")
+
+        # Ejecutar simulación
+        simulation_script = "/home/davidgonzalez/Documentos/David_2025/4_CONV1_SAB_STUCKAT_DEC_RAM_TB/CONV1_SAB_STUCKAT_DEC_RAM.sim/sim_1/behav/xsim/simulate.sh"
+        simulation_results = {}
+        csv_processing_results = {}
+        
+        if os.path.exists(simulation_script):
+            print(f"🔍 Ejecutando simulación: {simulation_script}")
+            try:
+                # Cambiar al directorio de simulación
+                sim_dir = os.path.dirname(simulation_script)
+                
+                # Ejecutar simulación con timeout
+                result = subprocess.run(
+                    ["bash", simulation_script],
+                    cwd=sim_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=600  # 10 minutos de timeout
+                )
+                
+                if result.returncode == 0:
+                    print("✅ Simulación ejecutada exitosamente")
+                    simulation_results = {
+                        "status": "success",
+                        "message": "Simulación completada exitosamente",
+                        "output": result.stdout[-1000:] if result.stdout else "",  # Últimos 1000 caracteres
+                        "errors": result.stderr[-500:] if result.stderr else ""    # Últimos 500 caracteres de errores
+                    }
+                    
+                    # Procesar archivos CSV después de la simulación exitosa
+                    print("🔍 Buscando archivos CSV para procesar...")
+                    csv_files = []
+                    for file in os.listdir(sim_dir):
+                        if file.endswith('.csv') and 'Conv1' in file:
+                            csv_files.append(os.path.join(sim_dir, file))
+                    
+                    if csv_files:
+                        print(f"✅ Encontrados {len(csv_files)} archivos CSV para procesar")
+                        # Importar el procesador CSV
+                        from vhdl_hardware.csv_processor import CSVProcessor
+                        
+                        csv_processor = CSVProcessor()
+                        processed_results = []
+                        
+                        for csv_file in csv_files:
+                            try:
+                                print(f"🔄 Procesando archivo CSV: {csv_file}")
+                                result = csv_processor.process_simulation_csv(csv_file)
+                                processed_results.append({
+                                    "file": csv_file,
+                                    "result": result
+                                })
+                                print(f"✅ Archivo CSV procesado exitosamente: {csv_file}")
+                            except Exception as csv_error:
+                                print(f"❌ Error procesando CSV {csv_file}: {str(csv_error)}")
+                                processed_results.append({
+                                    "file": csv_file,
+                                    "error": str(csv_error)
+                                })
+                        
+                        csv_processing_results = {
+                            "status": "success",
+                            "processed_files": len(processed_results),
+                            "results": processed_results
+                        }
+                    else:
+                        print("⚠️ No se encontraron archivos CSV para procesar")
+                        csv_processing_results = {
+                            "status": "warning",
+                            "message": "No se encontraron archivos CSV para procesar"
+                        }
+                        
+                else:
+                    print(f"❌ ERROR en simulación (código: {result.returncode})")
+                    simulation_results = {
+                        "status": "error",
+                        "message": f"Simulación falló con código {result.returncode}",
+                        "output": result.stdout[-1000:] if result.stdout else "",
+                        "errors": result.stderr[-500:] if result.stderr else ""
+                    }
+                    
+            except subprocess.TimeoutExpired:
+                print("❌ ERROR: Simulación excedió tiempo límite")
+                simulation_results = {
+                    "status": "timeout",
+                    "message": "La simulación excedió el tiempo límite de 10 minutos"
+                }
+            except Exception as sim_error:
+                print(f"❌ ERROR en simulación: {str(sim_error)}")
+                simulation_results = {
+                    "status": "error",
+                    "message": f"Error ejecutando simulación: {str(sim_error)}"
+                }
+        else:
+            print(f"❌ Script de simulación no encontrado: {simulation_script}")
+            simulation_results = {
+                "status": "error",
+                "message": f"Script de simulación no encontrado: {simulation_script}"
+            }
+        
+        # Preparar respuesta
+        response_data = {
+            "status": "success",
+            "modification_results": modification_results,
+            "simulation_results": simulation_results,
+            "csv_processing_results": csv_processing_results,
+            "vhdl_file": vhdl_file_path,
+            "backup_file": backup_path,
+            "message": "Modificación de pesos, simulación y procesamiento CSV completado"
+        }
+        
+        print("✅ Respuesta preparada exitosamente")
+        return sanitize_for_json(response_data)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ ERROR general: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en el proceso: {str(e)}")
+
+
+def modify_vhdl_weights_and_bias(content: str, fault_config: dict) -> str:
+    """
+    Modifica los pesos (FMAP_X) y bias (BIAS_VAL_X) en el contenido del archivo VHDL.
+    
+    Args:
+        content: Contenido del archivo VHDL
+        fault_config: Configuración de fallos con filter_faults y bias_faults
+    
+    Returns:
+        Contenido modificado del archivo VHDL
+    """
+    import re
+    
+    modified_content = content
+    
+    # Procesar modificaciones de filtros (pesos)
+    filter_faults = fault_config.get('filter_faults', [])
+    if filter_faults:
+        print(f"🔧 Modificando filtros: {filter_faults}")
+        
+        # Agrupar fallos por filter_name
+        filter_groups = {}
+        for fault in filter_faults:
+            filter_name = fault.get('filter_name', '')
+            if filter_name not in filter_groups:
+                filter_groups[filter_name] = []
+            
+            # Convertir el formato del frontend al formato esperado
+        position_config = {
+            'row': fault.get('row', 0),
+            'col': fault.get('col', 0),
+            'bit_positions': [fault.get('bit_position', 0)],  # Convertir a lista
+            'fault_type': fault.get('fault_type', 'bitflip')  # Incluir tipo de fallo
+        }
+        filter_groups[filter_name].append(position_config)
+        
+        # Procesar cada grupo de filtros
+        for filter_name, positions in filter_groups.items():
+            if positions:
+                print(f"🔧 Procesando {filter_name} con posiciones: {positions}")
+                modified_content = modify_filter_in_vhdl(modified_content, filter_name, positions)
+    
+    # Procesar modificaciones de bias
+    bias_faults = fault_config.get('bias_faults', [])
+    if bias_faults:
+        print(f"🔧 Modificando bias: {bias_faults}")
+        
+        # Agrupar fallos por bias_name
+        bias_groups = {}
+        for fault in bias_faults:
+            bias_name = fault.get('bias_name', '')
+            if bias_name not in bias_groups:
+                bias_groups[bias_name] = []
+            
+            # Agregar la posición del bit y el tipo de fallo
+            fault_info = {
+                'bit_position': fault.get('bit_position', 0),
+                'fault_type': fault.get('fault_type', 'bitflip')
+            }
+            bias_groups[bias_name].append(fault_info)
+        
+        # Procesar cada grupo de bias
+        for bias_name, fault_infos in bias_groups.items():
+            if fault_infos:
+                print(f"🔧 Procesando {bias_name} con fallos: {fault_infos}")
+                modified_content = modify_bias_in_vhdl(modified_content, bias_name, fault_infos)
+    
+    return modified_content
+
+def modify_filter_in_vhdl(content: str, filter_name: str, positions: list) -> str:
+    """
+    Modifica un filtro específico (FMAP_X) en el contenido VHDL.
+    
+    Args:
+        content: Contenido del archivo VHDL
+        filter_name: Nombre del filtro (ej: "FMAP_1")
+        positions: Lista de posiciones a modificar [{"row": 0, "col": 1, "bit_positions": [0, 1]}]
+    
+    Returns:
+        Contenido modificado
+    """
+    import re
+    
+    # Buscar la definición del filtro en el VHDL
+    pattern = rf'constant {filter_name}: FILTER_TYPE:=\s*\((.*?)\);'
+    match = re.search(pattern, content, re.DOTALL)
+    
+    if not match:
+        print(f"⚠️ No se encontró el filtro {filter_name}")
+        return content
+    
+    filter_definition = match.group(1)
+    print(f"✅ Encontrado filtro {filter_name}")
+    
+    # Parsear la matriz del filtro
+    rows = []
+    for line in filter_definition.split('\n'):
+        line = line.strip()
+        if line.startswith('(') and line.endswith('),') or line.endswith(')'):
+            # Extraer valores entre paréntesis
+            row_match = re.search(r'\((.*?)\)', line)
+            if row_match:
+                values = [v.strip().strip('"') for v in row_match.group(1).split(',')]
+                rows.append(values)
+    
+    print(f"🔍 Matriz original del filtro {filter_name}: {len(rows)}x{len(rows[0]) if rows else 0}")
+    
+    # Aplicar modificaciones
+    for pos_config in positions:
+        row = pos_config.get('row', 0)
+        col = pos_config.get('col', 0)
+        bit_positions = pos_config.get('bit_positions', [])
+        fault_type = pos_config.get('fault_type', 'bitflip')
+        
+        if 0 <= row < len(rows) and 0 <= col < len(rows[row]):
+            original_value = rows[row][col]
+            modified_value = apply_bit_faults(original_value, bit_positions, fault_type)
+            rows[row][col] = modified_value
+            print(f"✅ Modificado {filter_name}[{row}][{col}]: {original_value} → {modified_value} (tipo: {fault_type})")
+        else:
+            print(f"⚠️ Posición inválida {filter_name}[{row}][{col}]")
+    
+    # Reconstruir la definición del filtro
+    new_filter_lines = []
+    for i, row in enumerate(rows):
+        formatted_values = ','.join([f'"{val}"' for val in row])
+        if i == len(rows) - 1:
+            new_filter_lines.append(f'\t\t({formatted_values})')
+        else:
+            new_filter_lines.append(f'\t\t({formatted_values}),')
+    
+    new_filter_definition = f'constant {filter_name}: FILTER_TYPE:= (\n' + '\n'.join(new_filter_lines) + '\n\t);'
+    
+    # Reemplazar en el contenido
+    return content.replace(match.group(0), new_filter_definition)
+
+def modify_bias_in_vhdl(content: str, bias_name: str, fault_infos: list) -> str:
+    """
+    Modifica un bias específico (BIAS_VAL_X) en el contenido VHDL.
+    
+    Args:
+        content: Contenido del archivo VHDL
+        bias_name: Nombre del bias (ej: "BIAS_VAL_1")
+        fault_infos: Lista de información de fallos [{'bit_position': 0, 'fault_type': 'stuck_at_0'}, ...]
+    
+    Returns:
+        Contenido modificado
+    """
+    import re
+    
+    # Buscar la definición del bias en el VHDL
+    pattern = rf'constant {bias_name}: signed \(15 downto 0\) := "([01]+)";'
+    match = re.search(pattern, content)
+    
+    if not match:
+        print(f"⚠️ No se encontró el bias {bias_name}")
+        return content
+    
+    original_value = match.group(1)
+    modified_value = original_value
+    
+    # Aplicar cada fallo
+    for fault_info in fault_infos:
+        bit_position = fault_info.get('bit_position', 0)
+        fault_type = fault_info.get('fault_type', 'bitflip')
+        modified_value = apply_bit_faults(modified_value, [bit_position], fault_type)
+    
+    print(f"✅ Modificado {bias_name}: {original_value} → {modified_value}")
+    
+    # Reemplazar en el contenido
+    new_definition = f'constant {bias_name}: signed (15 downto 0) := "{modified_value}";'
+    return content.replace(match.group(0), new_definition)
+
+def apply_bit_faults(binary_string: str, bit_positions: list, fault_type: str = 'bitflip') -> str:
+    """
+    Aplica fallos de bit según el tipo especificado a una cadena binaria.
+    
+    Args:
+        binary_string: Cadena binaria original
+        bit_positions: Lista de posiciones de bits a modificar
+        fault_type: Tipo de fallo ('bitflip', 'stuck_at_0', 'stuck_at_1')
+    
+    Returns:
+        Cadena binaria modificada
+    """
+    if not bit_positions:
+        return binary_string
+    
+    # Convertir a lista para poder modificar
+    bits = list(binary_string)
+    
+    for bit_pos in bit_positions:
+        if 0 <= bit_pos < len(bits):
+            original_bit = bits[bit_pos]
+            
+            if fault_type == 'stuck_at_0':
+                # Forzar el bit a 0
+                bits[bit_pos] = '0'
+                print(f"  🔒 Bit {bit_pos}: {original_bit} → 0 (stuck-at-0)")
+            elif fault_type == 'stuck_at_1':
+                # Forzar el bit a 1
+                bits[bit_pos] = '1'
+                print(f"  🔒 Bit {bit_pos}: {original_bit} → 1 (stuck-at-1)")
+            else:  # bitflip o cualquier otro tipo
+                # Invertir el bit (comportamiento original)
+                bits[bit_pos] = '1' if bits[bit_pos] == '0' else '0'
+                print(f"  🔄 Bit {bit_pos}: {original_bit} → {bits[bit_pos]} (bit-flip)")
+        else:
+            print(f"  ⚠️ Posición de bit inválida: {bit_pos} (longitud: {len(bits)})")
+    
+    return ''.join(bits)
+
+@app.post("/modify_vhdl_weights/")
+async def modify_vhdl_weights(
+    filter_faults: str = Body(None),
+    bias_faults: str = Body(None),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Modifica los pesos y bias en el archivo VHDL según la configuración de fallos.
+    """
+    try:
+        print(f"🔍 DEBUG: Recibido filter_faults: {filter_faults}")
+        print(f"🔍 DEBUG: Recibido bias_faults: {bias_faults}")
+        
+        # Ruta del archivo VHDL
+        vhdl_file_path = "/home/davidgonzalez/Documentos/David_2025/4_CONV1_SAB_STUCKAT_DEC_RAM_TB/CONV1_SAB_STUCKAT_DEC_RAM.srcs/sources_1/new/CONV1_SAB_STUCK_DECOS.vhd"
+        
+        # Verificar que el archivo existe
+        if not os.path.exists(vhdl_file_path):
+            raise HTTPException(status_code=404, detail=f"Archivo VHDL no encontrado: {vhdl_file_path}")
+        
+        # Parsear configuraciones de fallos
+        try:
+            print(f"🔍 DEBUG: Parseando filter_faults: {filter_faults}")
+            filter_config = json.loads(filter_faults) if filter_faults else {}
+            print(f"🔍 DEBUG: Parseando bias_faults: {bias_faults}")
+            bias_config = json.loads(bias_faults) if bias_faults else {}
+            print(f"✅ Configuraciones parseadas - filter: {filter_config}, bias: {bias_config}")
+        except json.JSONDecodeError as e:
+            print(f"❌ ERROR: Error parseando JSON: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Error parseando configuración JSON: {str(e)}")
+        
+        # Crear directorio temporal para respaldo
+        temp_dir = f"/tmp/vhdl_backup_{uuid.uuid4()}"
+        os.makedirs(temp_dir, exist_ok=True)
+        print(f"✅ Directorio temporal creado: {temp_dir}")
+        
+        # Crear respaldo del archivo original
+        backup_path = os.path.join(temp_dir, "CONV1_SAB_STUCK_DECOS_backup.vhd")
+        shutil.copy2(vhdl_file_path, backup_path)
+        print(f"✅ Respaldo creado: {backup_path}")
+        
+        # Modificar pesos en el archivo VHDL
+        modification_results = {}
+        try:
+            print("🔄 Iniciando modificación de pesos...")
+            # Leer el archivo VHDL
+            with open(vhdl_file_path, 'r') as file:
+                content = file.read()
+            
+            # Crear configuración combinada
+            fault_config = {
+                'filter_faults': filter_config,
+                'bias_faults': bias_config
+            }
+            
+            # Implementar modificación real de pesos y bias en el archivo VHDL
+            modified_content = modify_vhdl_weights_and_bias(content, fault_config)
+            
+            # Escribir archivo modificado
+            with open(vhdl_file_path, 'w') as file:
+                file.write(modified_content)
+            
+            modification_results = {
+                "status": "success",
+                "filter_faults_applied": filter_config,
+                "bias_faults_applied": bias_config,
+                "backup_created": backup_path
+            }
+            print("✅ Modificación de pesos completada")
+            
+        except Exception as mod_error:
+            print(f"❌ ERROR en modificación: {str(mod_error)}")
+            # Restaurar archivo original en caso de error
+            shutil.copy2(backup_path, vhdl_file_path)
+            raise HTTPException(status_code=500, detail=f"Error modificando archivo VHDL: {str(mod_error)}")
+        
+        # Ejecutar script de simulación
+        simulation_script = "/home/davidgonzalez/Documentos/David_2025/4_CONV1_SAB_STUCKAT_DEC_RAM_TB/CONV1_SAB_STUCKAT_DEC_RAM.sim/sim_1/behav/xsim/simulate.sh"
+        simulation_results = {}
+        print(f"🔍 DEBUG: Verificando script de simulación: {simulation_script}")
+        
+        if os.path.exists(simulation_script):
+            print("✅ Script de simulación encontrado, ejecutando...")
+            try:
+                # Ejecutar el script de simulación con timeout de 10 minutos
+                simulation_process = subprocess.run(
+                    ["bash", simulation_script],
+                    cwd=os.path.dirname(simulation_script),
+                    capture_output=True,
+                    text=True,
+                    timeout=600  # 10 minutos
+                )
+                
+                simulation_results = {
+                    "status": "completed",
+                    "return_code": simulation_process.returncode,
+                    "stdout": simulation_process.stdout[:1000] if simulation_process.stdout else "",  # Limitar output
+                    "stderr": simulation_process.stderr[:1000] if simulation_process.stderr else "",  # Limitar output
+                    "script_path": simulation_script
+                }
+                print(f"✅ Simulación completada con código: {simulation_process.returncode}")
+                
+                # Buscar archivos Excel y CSV generados
+                result_files = []
+                simulation_dir = os.path.dirname(simulation_script)
+                for root, dirs, files in os.walk(simulation_dir):
+                    for file in files:
+                        if file.endswith(('.xlsx', '.xls', '.csv')):
+                            result_files.append(os.path.join(root, file))
+                
+                simulation_results["result_files"] = result_files
+                simulation_results["excel_files"] = [f for f in result_files if f.endswith(('.xlsx', '.xls'))]  # Mantener compatibilidad
+                simulation_results["csv_files"] = [f for f in result_files if f.endswith('.csv')]
+                print(f"📊 Archivos de resultados encontrados: {len(result_files)} (Excel: {len(simulation_results['excel_files'])}, CSV: {len(simulation_results['csv_files'])})")
+                
+                # Procesar archivos CSV después de la simulación exitosa
+                csv_processing_results = {}
+                csv_files = [f for f in result_files if f.endswith('.csv') and 'Conv1' in f]
+                
+                if csv_files:
+                    print(f"✅ Encontrados {len(csv_files)} archivos CSV para procesar")
+                    # Importar el procesador CSV
+                    from vhdl_hardware.csv_processor import CSVProcessor
+                    
+                    csv_processor = CSVProcessor()
+                    processed_results = []
+                    
+                    for csv_file in csv_files:
+                        try:
+                            print(f"🔄 Procesando archivo CSV: {csv_file}")
+                            result = csv_processor.process_simulation_csv(csv_file)
+                            processed_results.append({
+                                "file": csv_file,
+                                "result": result
+                            })
+                            print(f"✅ Archivo CSV procesado exitosamente: {csv_file}")
+                        except Exception as csv_error:
+                            print(f"❌ Error procesando CSV {csv_file}: {str(csv_error)}")
+                            processed_results.append({
+                                "file": csv_file,
+                                "error": str(csv_error)
+                            })
+                    
+                    csv_processing_results = {
+                        "status": "success",
+                        "processed_files": len(processed_results),
+                        "results": processed_results
+                    }
+                    simulation_results["csv_processing_results"] = csv_processing_results
+                else:
+                    print("⚠️ No se encontraron archivos CSV para procesar")
+                    simulation_results["csv_processing_results"] = {
+                        "status": "warning",
+                        "message": "No se encontraron archivos CSV para procesar"
+                    }
+                
+            except subprocess.TimeoutExpired:
+                print("⏰ Simulación excedió tiempo límite")
+                simulation_results = {
+                    "status": "timeout",
+                    "message": "La simulación excedió el tiempo límite de 10 minutos"
+                }
+            except Exception as sim_error:
+                print(f"❌ ERROR en simulación: {str(sim_error)}")
+                simulation_results = {
+                    "status": "error",
+                    "message": f"Error ejecutando simulación: {str(sim_error)}"
+                }
+        else:
+            print(f"❌ Script de simulación no encontrado: {simulation_script}")
+            simulation_results = {
+                "status": "error",
+                "message": f"Script de simulación no encontrado: {simulation_script}"
+            }
+        
+        # Preparar respuesta
+        response_data = {
+            "status": "success",
+            "modification_results": modification_results,
+            "simulation_results": simulation_results,
+            "vhdl_file": vhdl_file_path,
+            "backup_file": backup_path,
+            "message": "Modificación de pesos y simulación completada"
+        }
+        
+        print("✅ Respuesta preparada exitosamente")
+        return sanitize_for_json(response_data)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ ERROR general: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en el proceso: {str(e)}")
 
 if __name__ == "__main__":
     # Configuración del servidor
