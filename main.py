@@ -28,11 +28,13 @@ import keras
 
 # Importar inferencia manual
 from fault_injection.manual_inference import ManualInference
+from vhdl_hardware.golden_values import get_all_golden_values, generate_vhdl_constants
 
 # Importar módulos de hardware VHDL
 from vhdl_hardware.hardware_fault_injector import HardwareFaultInjector
 from vhdl_hardware.vhdl_weight_modifier import VHDLWeightModifier
 from vhdl_hardware.vivado_controller import VivadoController
+from vhdl_hardware.csv_processor import CSVProcessor
 
 def sanitize_for_json(obj):
     """
@@ -1002,20 +1004,20 @@ def get_supported_faults():
         # Estructura que espera el frontend
         supported_faults = {
             "filter_targets": [
-                {"name": "filter_0", "description": "Filtro 0 - Primera capa convolucional"},
-                {"name": "filter_1", "description": "Filtro 1 - Primera capa convolucional"},
-                {"name": "filter_2", "description": "Filtro 2 - Primera capa convolucional"},
-                {"name": "filter_3", "description": "Filtro 3 - Primera capa convolucional"},
-                {"name": "filter_4", "description": "Filtro 4 - Primera capa convolucional"},
-                {"name": "filter_5", "description": "Filtro 5 - Primera capa convolucional"}
+                {"name": "FMAP_1", "description": "FMAP_1 - Primera capa convolucional"},
+                {"name": "FMAP_2", "description": "FMAP_2 - Primera capa convolucional"},
+                {"name": "FMAP_3", "description": "FMAP_3 - Primera capa convolucional"},
+                {"name": "FMAP_4", "description": "FMAP_4 - Primera capa convolucional"},
+                {"name": "FMAP_5", "description": "FMAP_5 - Primera capa convolucional"},
+                {"name": "FMAP_6", "description": "FMAP_6 - Primera capa convolucional"}
             ],
             "bias_targets": [
-                {"name": "bias_0", "description": "Sesgo 0 - Primera capa convolucional"},
-                {"name": "bias_1", "description": "Sesgo 1 - Primera capa convolucional"},
-                {"name": "bias_2", "description": "Sesgo 2 - Primera capa convolucional"},
-                {"name": "bias_3", "description": "Sesgo 3 - Primera capa convolucional"},
-                {"name": "bias_4", "description": "Sesgo 4 - Primera capa convolucional"},
-                {"name": "bias_5", "description": "Sesgo 5 - Primera capa convolucional"}
+                {"name": "BIAS_VAL_1", "description": "BIAS_VAL_1 - Primera capa convolucional"},
+                {"name": "BIAS_VAL_2", "description": "BIAS_VAL_2 - Primera capa convolucional"},
+                {"name": "BIAS_VAL_3", "description": "BIAS_VAL_3 - Primera capa convolucional"},
+                {"name": "BIAS_VAL_4", "description": "BIAS_VAL_4 - Primera capa convolucional"},
+                {"name": "BIAS_VAL_5", "description": "BIAS_VAL_5 - Primera capa convolucional"},
+                {"name": "BIAS_VAL_6", "description": "BIAS_VAL_6 - Primera capa convolucional"}
             ],
             "fault_types": [
                 {"name": "stuck_at_0", "description": "Forzar bit a valor 0"},
@@ -1053,6 +1055,38 @@ def validate_vivado_installation(vivado_path: str = None):
         }
 
 
+@app.get("/vhdl/file_status/")
+async def get_vhdl_file_status(file_path: str, current_user: dict = Depends(get_current_user)):
+    """
+    Endpoint para verificar el estado de un archivo VHDL y obtener su contenido actualizado
+    """
+    try:
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"Archivo no encontrado: {file_path}")
+        
+        # Obtener información del archivo
+        file_stats = os.stat(file_path)
+        
+        # Leer el contenido del archivo
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        return {
+            "status": "success",
+            "file_info": {
+                "path": file_path,
+                "size": file_stats.st_size,
+                "last_modified": file_stats.st_mtime,
+                "last_modified_ms": int(file_stats.st_mtime * 1000)
+            },
+            "content": content,
+            "timestamp": int(time.time() * 1000)
+        }
+        
+    except Exception as e:
+        print(f"❌ ERROR obteniendo estado del archivo: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error obteniendo estado del archivo: {str(e)}")
+
 
 @app.post("/vhdl/inject_faults/")
 async def inject_vhdl_faults(
@@ -1089,15 +1123,7 @@ async def inject_vhdl_faults(
             print(f"❌ ERROR: Error parseando JSON: {str(e)}")
             raise HTTPException(status_code=400, detail=f"Error parseando configuración JSON: {str(e)}")
         
-        # Crear directorio temporal para respaldo
-        temp_dir = f"/tmp/vhdl_backup_{uuid.uuid4()}"
-        os.makedirs(temp_dir, exist_ok=True)
-        print(f"✅ Directorio temporal creado: {temp_dir}")
-        
-        # Crear respaldo del archivo original
-        backup_path = os.path.join(temp_dir, "CONV1_SAB_STUCK_DECOS_backup.vhd")
-        shutil.copy2(vhdl_file_path, backup_path)
-        print(f"✅ Respaldo creado: {backup_path}")
+        # Proceder directamente sin crear backup
 
         # Leer contenido del archivo VHDL
         with open(vhdl_file_path, 'r', encoding='utf-8') as f:
@@ -1303,8 +1329,14 @@ async def inject_vhdl_faults(
             "simulation_results": simulation_results,
             "csv_processing_results": csv_processing_results,
             "vhdl_file": vhdl_file_path,
-            "backup_file": backup_path,
-            "message": "Modificación de pesos, simulación y procesamiento CSV completado"
+            "message": "Modificación de pesos, simulación y procesamiento CSV completado",
+            "file_modified": True,
+            "modification_timestamp": int(time.time() * 1000),  # Timestamp en milisegundos
+            "file_info": {
+                "path": vhdl_file_path,
+                "size": os.path.getsize(vhdl_file_path) if os.path.exists(vhdl_file_path) else 0,
+                "last_modified": os.path.getmtime(vhdl_file_path) if os.path.exists(vhdl_file_path) else 0
+            }
         }
         
         print("✅ Respuesta preparada exitosamente")
@@ -1315,6 +1347,255 @@ async def inject_vhdl_faults(
     except Exception as e:
         print(f"❌ ERROR general: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error en el proceso: {str(e)}")
+
+
+def inject_golden_values_to_vhdl(content):
+    """
+    Inyecta los valores golden (originales) en el contenido VHDL
+    """
+    try:
+        print("🔄 Iniciando inyección de valores golden...")
+        
+        # Obtener todos los valores golden
+        golden_values = get_all_golden_values()
+        
+        # Reemplazar cada filtro FMAP con valores golden
+        for i in range(1, 7):
+            filter_name = f"FMAP_{i}"
+            if filter_name in golden_values['fmap']:
+                content = replace_filter_with_golden_values(content, filter_name, golden_values['fmap'][filter_name])
+                print(f"✅ Valor golden inyectado para {filter_name}")
+        
+        # Reemplazar cada valor BIAS con valores golden
+        for i in range(1, 7):
+            bias_name = f"BIAS_VAL_{i}"
+            if bias_name in golden_values['bias']:
+                content = replace_bias_with_golden_value(content, bias_name, golden_values['bias'][bias_name])
+                print(f"✅ Valor golden inyectado para {bias_name}")
+        
+        print("✅ Inyección de valores golden completada")
+        return content
+        
+    except Exception as e:
+        print(f"❌ ERROR en inyección de valores golden: {str(e)}")
+        raise Exception(f"Error inyectando valores golden: {str(e)}")
+
+
+@app.post("/vhdl/golden_simulation/")
+async def golden_simulation(current_user: dict = Depends(get_current_user)):
+    """
+    Ejecuta simulación golden (con valores originales) del hardware VHDL
+    """
+    try:
+        print("🚀 Iniciando simulación golden...")
+        
+        # Ruta del archivo VHDL
+        vhdl_file_path = "/home/davidgonzalez/Documentos/David_2025/4_CONV1_SAB_STUCKAT_DEC_RAM_TB/CONV1_SAB_STUCKAT_DEC_RAM.srcs/sources_1/new/CONV1_SAB_STUCK_DECOS.vhd"
+        
+        # Verificar que el archivo existe
+        if not os.path.exists(vhdl_file_path):
+            raise HTTPException(status_code=404, detail=f"Archivo VHDL no encontrado: {vhdl_file_path}")
+        
+        print(f"📁 Archivo VHDL encontrado: {vhdl_file_path}")
+        
+        # Proceder directamente sin crear backup
+        
+        # Leer contenido del archivo VHDL
+        with open(vhdl_file_path, 'r', encoding='utf-8') as file:
+            original_content = file.read()
+        
+        # Inyectar valores golden
+        modified_content = inject_golden_values_to_vhdl(original_content)
+        
+        # Escribir el archivo modificado
+        with open(vhdl_file_path, 'w', encoding='utf-8') as file:
+            file.write(modified_content)
+        
+        print("✅ Valores golden inyectados en el archivo VHDL")
+        
+        modification_results = {
+            "status": "success",
+            "message": "Valores golden inyectados correctamente",
+            "values_injected": {
+                "filters": ["FMAP_1", "FMAP_2", "FMAP_3", "FMAP_4", "FMAP_5", "FMAP_6"],
+                "bias": ["BIAS_VAL_1", "BIAS_VAL_2", "BIAS_VAL_3", "BIAS_VAL_4", "BIAS_VAL_5", "BIAS_VAL_6"]
+            }
+        }
+        
+        # Configurar rutas de scripts de simulación
+        base_dir = "/home/davidgonzalez/Documentos/David_2025/4_CONV1_SAB_STUCKAT_DEC_RAM_TB/CONV1_SAB_STUCKAT_DEC_RAM.sim/sim_1/behav/xsim"
+        compile_script = os.path.join(base_dir, "compile.sh")
+        elaborate_script = os.path.join(base_dir, "elaborate.sh")
+        simulation_script = os.path.join(base_dir, "simulate.sh")
+        
+        simulation_results = {}
+        csv_processing_results = {}
+        
+        # Verificar que todos los scripts existen
+        if all(os.path.exists(script) for script in [compile_script, elaborate_script, simulation_script]):
+            print("📋 Todos los scripts de simulación encontrados")
+            
+            try:
+                # Ejecutar compile.sh
+                print("🔨 Ejecutando compile.sh...")
+                compile_result = subprocess.run(
+                    ["bash", compile_script],
+                    cwd=base_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                
+                if compile_result.returncode == 0:
+                    print("✅ compile.sh ejecutado exitosamente")
+                    
+                    # Ejecutar elaborate.sh
+                    print("🔧 Ejecutando elaborate.sh...")
+                    elaborate_result = subprocess.run(
+                        ["bash", elaborate_script],
+                        cwd=base_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=300
+                    )
+                    
+                    if elaborate_result.returncode == 0:
+                        print("✅ elaborate.sh ejecutado exitosamente")
+                        
+                        # Ejecutar simulate.sh
+                        print("⚡ Ejecutando simulate.sh...")
+                        simulate_result = subprocess.run(
+                            ["bash", simulation_script],
+                            cwd=base_dir,
+                            capture_output=True,
+                            text=True,
+                            timeout=600
+                        )
+                        
+                        if simulate_result.returncode == 0:
+                            print("✅ simulate.sh ejecutado exitosamente")
+                            simulation_results = {
+                                "status": "success",
+                                "message": "Simulación golden completada exitosamente",
+                                "steps_completed": ["compile", "elaborate", "simulate"],
+                                "output": simulate_result.stdout[-1000:] if simulate_result.stdout else ""
+                            }
+                            
+                            # Procesar archivos CSV resultantes
+                            print("📊 Procesando archivos CSV...")
+                            simulation_dir = base_dir
+                            csv_files = [f for f in os.listdir(simulation_dir) if f.endswith('.csv') and 'Conv1' in f]
+                            
+                            if csv_files:
+                                print(f"📄 Archivos CSV encontrados: {csv_files}")
+                                processed_results = []
+                                
+                                # Procesar solo el primer archivo CSV
+                                csv_file = csv_files[0]
+                                print(f"📄 Procesando solo el primer archivo: {csv_file}")
+                                csv_path = os.path.join(simulation_dir, csv_file)
+                                try:
+                                    processor = CSVProcessor()
+                                    result = processor.process_simulation_csv(csv_path)
+                                    processed_results.append({
+                                        "file": csv_file,
+                                        "status": "success",
+                                        "result": result
+                                    })
+                                    print(f"✅ Procesado: {csv_file}")
+                                except Exception as csv_error:
+                                    print(f"❌ Error procesando {csv_file}: {str(csv_error)}")
+                                    processed_results.append({
+                                        "file": csv_file,
+                                        "status": "error",
+                                        "error": str(csv_error)
+                                    })
+                                
+                                csv_processing_results = {
+                                    "status": "success",
+                                    "processed_files": len(processed_results),
+                                    "results": processed_results
+                                }
+                            else:
+                                print("⚠️ No se encontraron archivos CSV para procesar")
+                                csv_processing_results = {
+                                    "status": "warning",
+                                    "message": "No se encontraron archivos CSV para procesar"
+                                }
+                        else:
+                            print(f"❌ ERROR en simulate.sh (código: {simulate_result.returncode})")
+                            simulation_results = {
+                                "status": "error",
+                                "message": f"Simulación falló con código {simulate_result.returncode}",
+                                "step": "simulate",
+                                "steps_completed": ["compile", "elaborate"],
+                                "output": simulate_result.stdout[-1000:] if simulate_result.stdout else "",
+                                "errors": simulate_result.stderr[-500:] if simulate_result.stderr else ""
+                            }
+                    else:
+                        print(f"❌ ERROR en elaborate.sh (código: {elaborate_result.returncode})")
+                        simulation_results = {
+                            "status": "error",
+                            "message": f"Elaboración falló con código {elaborate_result.returncode}",
+                            "step": "elaborate",
+                            "steps_completed": ["compile"],
+                            "output": elaborate_result.stdout[-1000:] if elaborate_result.stdout else "",
+                            "errors": elaborate_result.stderr[-500:] if elaborate_result.stderr else ""
+                        }
+                else:
+                    print(f"❌ ERROR en compile.sh (código: {compile_result.returncode})")
+                    simulation_results = {
+                        "status": "error",
+                        "message": f"Compilación falló con código {compile_result.returncode}",
+                        "step": "compile",
+                        "steps_completed": [],
+                        "output": compile_result.stdout[-1000:] if compile_result.stdout else "",
+                        "errors": compile_result.stderr[-500:] if compile_result.stderr else ""
+                    }
+                    
+            except subprocess.TimeoutExpired as timeout_error:
+                print(f"❌ ERROR: Proceso excedió tiempo límite: {str(timeout_error)}")
+                simulation_results = {
+                    "status": "timeout",
+                    "message": f"El proceso excedió el tiempo límite: {str(timeout_error)}"
+                }
+            except Exception as sim_error:
+                print(f"❌ ERROR en secuencia de simulación: {str(sim_error)}")
+                simulation_results = {
+                    "status": "error",
+                    "message": f"Error ejecutando secuencia de simulación: {str(sim_error)}"
+                }
+        else:
+            print(f"❌ Scripts de simulación no encontrados en: {base_dir}")
+            simulation_results = {
+                "status": "error",
+                "message": f"Scripts de simulación no encontrados en: {base_dir}",
+                "missing_scripts": {
+                    "compile.sh": not os.path.exists(compile_script),
+                    "elaborate.sh": not os.path.exists(elaborate_script),
+                    "simulate.sh": not os.path.exists(simulation_script)
+                }
+            }
+        
+        # Preparar respuesta
+        response_data = {
+            "status": "success",
+            "simulation_type": "golden",
+            "modification_results": modification_results,
+            "simulation_results": simulation_results,
+            "csv_processing_results": csv_processing_results,
+            "vhdl_file": vhdl_file_path,
+            "message": "Simulación golden completada"
+        }
+        
+        print("✅ Simulación golden completada exitosamente")
+        return sanitize_for_json(response_data)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ ERROR general en simulación golden: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en simulación golden: {str(e)}")
 
 
 def modify_vhdl_weights_and_bias(content: str, fault_config: dict) -> str:
@@ -1337,27 +1618,20 @@ def modify_vhdl_weights_and_bias(content: str, fault_config: dict) -> str:
     if filter_faults:
         print(f"🔧 Modificando filtros: {filter_faults}")
         
-        # Agrupar fallos por filter_name
-        filter_groups = {}
+        # Procesar cada fallo individualmente para preservar los tipos de fallo específicos
         for fault in filter_faults:
             filter_name = fault.get('filter_name', '')
-            if filter_name not in filter_groups:
-                filter_groups[filter_name] = []
-            
-            # Convertir el formato del frontend al formato esperado
-        position_config = {
-            'row': fault.get('row', 0),
-            'col': fault.get('col', 0),
-            'bit_positions': [fault.get('bit_position', 0)],  # Convertir a lista
-            'fault_type': fault.get('fault_type', 'bitflip')  # Incluir tipo de fallo
-        }
-        filter_groups[filter_name].append(position_config)
-        
-        # Procesar cada grupo de filtros
-        for filter_name, positions in filter_groups.items():
-            if positions:
-                print(f"🔧 Procesando {filter_name} con posiciones: {positions}")
-                modified_content = modify_filter_in_vhdl(modified_content, filter_name, positions)
+            if filter_name:
+                # Convertir el formato del frontend al formato esperado
+                position_config = {
+                    'row': int(fault.get('row', 0)),  # Convertir a entero
+                    'col': int(fault.get('col', 0)),  # Convertir a entero
+                    'bit_positions': [int(fault.get('bit_position', 0))],  # Convertir a lista de enteros
+                    'fault_type': fault.get('fault_type', 'bitflip')  # Incluir tipo de fallo
+                }
+                
+                print(f"🔧 Procesando {filter_name} en posición [{position_config['row']}][{position_config['col']}] bit {position_config['bit_positions'][0]} con tipo: {position_config['fault_type']}")
+                modified_content = modify_filter_in_vhdl(modified_content, filter_name, [position_config])
     
     # Procesar modificaciones de bias
     bias_faults = fault_config.get('bias_faults', [])
@@ -1373,7 +1647,7 @@ def modify_vhdl_weights_and_bias(content: str, fault_config: dict) -> str:
             
             # Agregar la posición del bit y el tipo de fallo
             fault_info = {
-                'bit_position': fault.get('bit_position', 0),
+                'bit_position': int(fault.get('bit_position', 0)),  # Convertir a entero
                 'fault_type': fault.get('fault_type', 'bitflip')
             }
             bias_groups[bias_name].append(fault_info)
@@ -1529,6 +1803,77 @@ def apply_bit_faults(binary_string: str, bit_positions: list, fault_type: str = 
     
     return ''.join(bits)
 
+
+def replace_filter_with_golden_values(content: str, filter_name: str, golden_matrix: list) -> str:
+    """
+    Reemplaza completamente un filtro FMAP con los valores golden originales.
+    
+    Args:
+        content: Contenido del archivo VHDL
+        filter_name: Nombre del filtro (ej: "FMAP_1")
+        golden_matrix: Matriz 5x5 con los valores golden originales
+    
+    Returns:
+        Contenido modificado
+    """
+    import re
+    
+    # Buscar la definición del filtro en el VHDL
+    pattern = rf'constant {filter_name}: FILTER_TYPE:=\s*\((.*?)\);'
+    match = re.search(pattern, content, re.DOTALL)
+    
+    if not match:
+        print(f"⚠️ No se encontró el filtro {filter_name}")
+        return content
+    
+    print(f"✅ Encontrado filtro {filter_name}")
+    print(f"🔍 Matriz original del filtro {filter_name}: 5x5")
+    
+    # Construir la nueva definición del filtro con valores golden
+    new_filter_lines = []
+    for i, row in enumerate(golden_matrix):
+        formatted_values = ','.join([f'"{val}"' for val in row])
+        if i == len(golden_matrix) - 1:
+            new_filter_lines.append(f'\t\t({formatted_values})')
+        else:
+            new_filter_lines.append(f'\t\t({formatted_values}),')
+    
+    new_filter_definition = f'constant {filter_name}: FILTER_TYPE:= (\n' + '\n'.join(new_filter_lines) + '\n\t);'
+    
+    # Reemplazar en el contenido
+    return content.replace(match.group(0), new_filter_definition)
+
+
+def replace_bias_with_golden_value(content: str, bias_name: str, golden_value: str) -> str:
+    """
+    Reemplaza completamente un valor BIAS con el valor golden original.
+    
+    Args:
+        content: Contenido del archivo VHDL
+        bias_name: Nombre del bias (ej: "BIAS_VAL_1")
+        golden_value: Valor golden original en formato binario
+    
+    Returns:
+        Contenido modificado
+    """
+    import re
+    
+    # Buscar la definición del bias en el VHDL
+    pattern = rf'constant {bias_name}: std_logic_vector\(\d+ downto 0\) := "([^"]+)";'
+    match = re.search(pattern, content)
+    
+    if not match:
+        print(f"⚠️ No se encontró el bias {bias_name}")
+        return content
+    
+    print(f"✅ Encontrado bias {bias_name}")
+    
+    # Construir la nueva definición del bias con el valor golden
+    bit_width = len(match.group(1))
+    new_bias_definition = f'constant {bias_name}: std_logic_vector({bit_width-1} downto 0) := "{golden_value}";'
+    
+    # Reemplazar en el contenido
+    return content.replace(match.group(0), new_bias_definition)
 
 
 if __name__ == "__main__":
