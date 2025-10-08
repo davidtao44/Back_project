@@ -28,6 +28,7 @@ import keras
 
 # Importar inferencia manual
 from fault_injection.manual_inference import ManualInference
+from fault_campaign import FaultCampaign
 from vhdl_hardware.golden_values import get_all_golden_values, generate_vhdl_constants
 
 # Importar módulos de hardware VHDL
@@ -56,6 +57,18 @@ def sanitize_for_json(obj):
             return 1.0 if obj > 0 else 0.0
         else:
             return obj
+    elif isinstance(obj, np.integer):
+        # Convertir tipos enteros de numpy a int nativo de Python
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        # Convertir tipos flotantes de numpy a float nativo de Python
+        float_val = float(obj)
+        if np.isnan(float_val):
+            return 0.0
+        elif np.isinf(float_val):
+            return 1.0 if float_val > 0 else 0.0
+        else:
+            return float_val
     elif isinstance(obj, np.ndarray):
         # Convertir arrays numpy a listas y limpiar
         return sanitize_for_json(obj.tolist())
@@ -713,6 +726,19 @@ class ModelWeightsRequest(BaseModel):
     model_path: str
     output_dir: str = "model_weights"
     bits_value: int = 8  # Valor predeterminado de 8 bits
+
+# Modelos para Fault Campaign
+class FaultCampaignRequest(BaseModel):
+    model_path: str
+    num_samples: int = 100
+    fault_config: dict
+    image_dir: str = None
+
+class WeightFaultCampaignRequest(BaseModel):
+    model_path: str
+    num_samples: int = 100
+    weight_fault_config: dict
+    image_dir: str = None
 
 # Endpoint para extraer pesos y sesgos del modelo
 @app.post("/extract_model_weights/")
@@ -1874,6 +1900,121 @@ def replace_bias_with_golden_value(content: str, bias_name: str, golden_value: s
     
     # Reemplazar en el contenido
     return content.replace(match.group(0), new_bias_definition)
+
+
+# ==================== FAULT CAMPAIGN ENDPOINTS ====================
+
+@app.post("/fault_campaign/run/")
+async def run_fault_campaign(
+    request: FaultCampaignRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Ejecutar campaña de fallos en activaciones.
+    """
+    try:
+        print(f"🎯 Iniciando campaña de fallos para usuario: {current_user.get('username', 'unknown')}")
+        
+        # Validar que el modelo existe
+        if not os.path.exists(request.model_path):
+            raise HTTPException(status_code=404, detail=f"Modelo no encontrado: {request.model_path}")
+        
+        # Crear instancia de FaultCampaign
+        campaign = FaultCampaign(
+            model_path=request.model_path,
+            image_dir=request.image_dir
+        )
+        
+        # Ejecutar campaña
+        results = campaign.run_campaign(
+            num_samples=request.num_samples,
+            fault_config=request.fault_config
+        )
+        
+        print(f"✅ Campaña de fallos completada exitosamente")
+        
+        return {
+            "success": True,
+            "message": "Campaña de fallos ejecutada exitosamente",
+            "results": results
+        }
+        
+    except Exception as e:
+        print(f"❌ Error en campaña de fallos: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error ejecutando campaña de fallos: {str(e)}")
+
+@app.post("/fault_campaign/weight/run/")
+async def run_weight_fault_campaign(
+    request: WeightFaultCampaignRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Ejecutar campaña de fallos en pesos.
+    """
+    try:
+        print(f"🎯 Iniciando campaña de fallos en pesos para usuario: {current_user.get('username', 'unknown')}")
+        
+        # Validar que el modelo existe
+        if not os.path.exists(request.model_path):
+            raise HTTPException(status_code=404, detail=f"Modelo no encontrado: {request.model_path}")
+        
+        # Crear instancia de FaultCampaign
+        campaign = FaultCampaign(
+            model_path=request.model_path,
+            image_dir=request.image_dir
+        )
+        
+        # Ejecutar campaña de fallos en pesos
+        results = campaign.run_weight_fault_campaign(
+            num_samples=request.num_samples,
+            weight_fault_config=request.weight_fault_config
+        )
+        
+        print(f"✅ Campaña de fallos en pesos completada exitosamente")
+        
+        # Sanitizar resultados para evitar errores de serialización JSON
+        sanitized_results = sanitize_for_json(results)
+        
+        return {
+            "success": True,
+            "message": "Campaña de fallos en pesos ejecutada exitosamente",
+            "results": sanitized_results
+        }
+        
+    except Exception as e:
+        print(f"❌ Error en campaña de fallos en pesos: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error ejecutando campaña de fallos en pesos: {str(e)}")
+
+@app.get("/fault_campaign/models/")
+async def get_available_models_for_campaign(current_user: dict = Depends(get_current_user)):
+    """
+    Obtener lista de modelos disponibles para campañas de fallos.
+    """
+    try:
+        models_dir = "models"
+        available_models = []
+        
+        if os.path.exists(models_dir):
+            for filename in os.listdir(models_dir):
+                if filename.endswith(('.h5', '.keras')):
+                    model_path = os.path.join(models_dir, filename)
+                    model_info = {
+                        "name": filename,
+                        "path": model_path,
+                        "size": os.path.getsize(model_path),
+                        "modified": os.path.getmtime(model_path)
+                    }
+                    available_models.append(model_info)
+        
+        return {
+            "success": True,
+            "models": available_models,
+            "count": len(available_models)
+        }
+        
+    except Exception as e:
+        print(f"❌ Error obteniendo modelos: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error obteniendo modelos disponibles: {str(e)}")
 
 
 if __name__ == "__main__":
