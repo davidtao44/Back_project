@@ -44,7 +44,7 @@ class FaultCampaign:
         print(f"📊 Dataset cargado: {len(self.images)} imágenes")
         
         # Inicializar servicios
-        self.manual_inference = ManualInference(model_path)
+        self.manual_inference = ManualInference(model_instance=self.model)
         self.weight_fault_injector = WeightFaultInjector()
         
         # Resultados
@@ -137,6 +137,138 @@ class FaultCampaign:
         
         return x_test, y_test
     
+    def _convert_image_to_bytes(self, image: np.ndarray) -> bytes:
+        """
+        Convertir imagen numpy a bytes para inferencia manual.
+        
+        Args:
+            image: Imagen como array numpy
+            
+        Returns:
+            Imagen convertida a bytes
+        """
+        from PIL import Image as PILImage
+        import io
+        
+        # Asegurar que la imagen tenga la forma correcta
+        if len(image.shape) == 2:
+            image = np.expand_dims(image, axis=-1)
+        
+        # Convertir numpy array a imagen PIL
+        image_pil = PILImage.fromarray((image.squeeze() * 255).astype(np.uint8), mode='L')
+        
+        # Convertir a bytes
+        img_byte_arr = io.BytesIO()
+        image_pil.save(img_byte_arr, format='PNG')
+        return img_byte_arr.getvalue()
+    
+    def _perform_inference_on_samples(self, indices: np.ndarray, description: str) -> Tuple[List[int], List[int]]:
+        """
+        Realizar inferencia en un conjunto de muestras.
+        
+        Args:
+            indices: Índices de las muestras a procesar
+            description: Descripción para logging
+            
+        Returns:
+            Tuple con predicciones y etiquetas
+        """
+        predictions = []
+        labels = []
+        
+        # Verificar estado de los pesos al inicio de la inferencia
+        if "con pesos modificados" in description:
+            # Obtener algunos pesos para verificar que están modificados
+            for layer in self.model.layers:
+                if hasattr(layer, 'kernel') and layer.kernel is not None:
+                    weights = layer.kernel.numpy()
+                    print(f"🔍 DEBUG: Pesos de {layer.name} durante inferencia con fallos - muestra: {weights.flat[:3]}")
+                    break  # Solo mostrar la primera capa con pesos
+        
+        for i, idx in enumerate(indices):
+            image = self.images[idx]
+            label = self.labels[idx]
+            
+            # Convertir imagen a bytes
+            image_bytes = self._convert_image_to_bytes(image)
+            
+            # Realizar inferencia manual
+            result = self.manual_inference.perform_manual_inference(image_bytes)
+            predicted_class = result['final_prediction']['predicted_class']
+            
+            predictions.append(predicted_class)
+            labels.append(label)
+            
+            # Log detallado para las primeras 3 muestras
+            if i < 3:
+                print(f"  🔍 DEBUG {description} - Muestra {i+1}: Predicción={predicted_class}, Etiqueta={label}, Índice={idx}")
+            
+            if (i + 1) % 5 == 0:  # Reducir frecuencia para ver mejor los logs
+                print(f"  Procesadas {i + 1}/{len(indices)} muestras {description} - Última predicción: {predicted_class}, Etiqueta real: {label}")
+        
+        return predictions, labels
+    
+    def _create_campaign_results(self, golden_predictions: List[int], golden_labels: List[int], 
+                               fault_predictions: List[int], fault_labels: List[int],
+                               num_samples: int, execution_time: float, config: Dict[str, Any],
+                               config_key: str) -> Dict[str, Any]:
+        """
+        Crear estructura de resultados para una campaña.
+        
+        Args:
+            golden_predictions: Predicciones golden
+            golden_labels: Etiquetas golden
+            fault_predictions: Predicciones con fallos
+            fault_labels: Etiquetas con fallos
+            num_samples: Número de muestras procesadas
+            execution_time: Tiempo de ejecución
+            config: Configuración de fallos
+            config_key: Clave para la configuración en los resultados
+            
+        Returns:
+            Diccionario con resultados estructurados
+        """
+        # Calcular métricas
+        print(f"🔍 DEBUG: Calculando métricas golden con {len(golden_labels)} etiquetas y {len(golden_predictions)} predicciones")
+        golden_metrics = self.calculate_metrics(golden_labels, golden_predictions)
+        print(f"🔍 DEBUG: Métricas golden calculadas: {golden_metrics}")
+        
+        print(f"🔍 DEBUG: Calculando métricas con fallos con {len(fault_labels)} etiquetas y {len(fault_predictions)} predicciones")
+        fault_metrics = self.calculate_metrics(fault_labels, fault_predictions)
+        print(f"🔍 DEBUG: Métricas con fallos calculadas: {fault_metrics}")
+        
+        # Comparar resultados
+        comparison = self._compare_predictions(golden_predictions, fault_predictions)
+        print(f"🔍 DEBUG: Comparación calculada: {comparison}")
+        
+        results = {
+            'golden_results': {
+                'predictions': golden_predictions,
+                'labels': golden_labels,
+                'metrics': golden_metrics
+            },
+            'fault_results': {
+                'predictions': fault_predictions,
+                'labels': fault_labels,
+                'metrics': fault_metrics
+            },
+            'comparison': comparison,
+            'campaign_info': {
+                'session_id': self.session_id,
+                'model_path': self.model_path,
+                'num_samples': num_samples,
+                'execution_time_seconds': execution_time,
+                config_key: config
+            }
+        }
+        
+        print(f"🔍 DEBUG: Estructura final de resultados:")
+        print(f"  - Golden metrics keys: {list(golden_metrics.keys()) if golden_metrics else 'None'}")
+        print(f"  - Fault metrics keys: {list(fault_metrics.keys()) if fault_metrics else 'None'}")
+        print(f"  - Comparison keys: {list(comparison.keys()) if comparison else 'None'}")
+        
+        return results
+
     def run_golden_inference(self, num_samples: int) -> Tuple[List[int], List[int]]:
         """
         Ejecutar inferencia golden (sin fallos).
@@ -149,41 +281,12 @@ class FaultCampaign:
         """
         print(f"🏆 Iniciando inferencia golden con {num_samples} muestras...")
         
-        predictions = []
-        labels = []
+        # Seleccionar muestras aleatorias y guardarlas para reutilizar
+        self.selected_indices = np.random.choice(len(self.images), size=min(num_samples, len(self.images)), replace=False)
+        print(f"🔍 DEBUG: Índices seleccionados para golden: {self.selected_indices[:5]}...")  # Mostrar primeros 5
         
-        # Seleccionar muestras aleatorias
-        indices = np.random.choice(len(self.images), size=min(num_samples, len(self.images)), replace=False)
-        
-        for i, idx in enumerate(indices):
-            image = self.images[idx]
-            label = self.labels[idx]
-            
-            # Realizar predicción sin fallos usando inferencia manual
-            if len(image.shape) == 2:
-                image = np.expand_dims(image, axis=-1)
-            
-            # Convertir imagen a bytes para la inferencia manual
-            from PIL import Image as PILImage
-            import io
-            
-            # Convertir numpy array a imagen PIL
-            image_pil = PILImage.fromarray((image.squeeze() * 255).astype(np.uint8), mode='L')
-            
-            # Convertir a bytes
-            img_byte_arr = io.BytesIO()
-            image_pil.save(img_byte_arr, format='PNG')
-            image_bytes = img_byte_arr.getvalue()
-            
-            # Realizar inferencia manual
-            result = self.manual_inference.perform_manual_inference(image_bytes)
-            predicted_class = result['final_prediction']['predicted_class']
-            
-            predictions.append(predicted_class)
-            labels.append(label)
-            
-            if (i + 1) % 10 == 0:
-                print(f"  Procesadas {i + 1}/{len(indices)} muestras golden")
+        # Realizar inferencia en las muestras
+        predictions, labels = self._perform_inference_on_samples(self.selected_indices, "golden")
         
         self.results['golden']['predictions'] = predictions
         self.results['golden']['labels'] = labels
@@ -253,98 +356,48 @@ class FaultCampaign:
         # 1. Ejecutar inferencia golden
         golden_predictions, golden_labels = self.run_golden_inference(num_samples)
         
-        # 2. Configurar fallos en pesos
+        # 2. Hacer backup de pesos originales
+        print("💾 Haciendo backup de pesos originales...")
+        self.weight_fault_injector.backup_original_weights(self.model)
+        
+        # 3. Configurar fallos en pesos
         print("🔧 Configurando inyección de fallos en pesos...")
         for layer_name, layer_config in weight_fault_config.get('layers', {}).items():
             self.weight_fault_injector.configure_fault(layer_name, layer_config)
         
-        # 3. Aplicar fallos en pesos
+        # 4. Aplicar fallos en pesos
         print("⚡ Aplicando fallos en pesos del modelo...")
         injected_weight_faults = self.weight_fault_injector.inject_faults_in_weights(self.model)
         print(f"✅ Inyectados {len(injected_weight_faults)} fallos en pesos")
         
-        # 4. Ejecutar inferencia con pesos modificados
+        # 5. Ejecutar inferencia con pesos modificados
         print("🔍 Ejecutando inferencia con pesos modificados...")
-        fault_predictions = []
-        fault_labels = []
+        # Usar exactamente las mismas muestras que en golden
+        if not hasattr(self, 'selected_indices'):
+            raise ValueError("❌ ERROR: No se han seleccionado índices en la inferencia golden")
+        print(f"🔍 DEBUG: Usando los mismos índices que golden: {self.selected_indices[:5]}...")  # Mostrar primeros 5
+        fault_predictions, fault_labels = self._perform_inference_on_samples(self.selected_indices, "con pesos modificados")
         
-        # Usar las mismas muestras que en golden
-        indices = np.random.choice(len(self.images), size=min(num_samples, len(self.images)), replace=False)
-        
-        for i, idx in enumerate(indices):
-            image = self.images[idx]
-            label = self.labels[idx]
-            
-            # Realizar predicción con inferencia manual usando el modelo con pesos modificados
-            if len(image.shape) == 2:
-                image = np.expand_dims(image, axis=-1)
-            
-            # Convertir imagen a bytes para la inferencia manual
-            from PIL import Image as PILImage
-            import io
-            
-            # Convertir numpy array a imagen PIL
-            image_pil = PILImage.fromarray((image.squeeze() * 255).astype(np.uint8), mode='L')
-            
-            # Convertir a bytes
-            img_byte_arr = io.BytesIO()
-            image_pil.save(img_byte_arr, format='PNG')
-            image_bytes = img_byte_arr.getvalue()
-            
-            # Realizar inferencia manual
-            result = self.manual_inference.perform_manual_inference(image_bytes)
-            predicted_class = result['final_prediction']['predicted_class']
-            
-            fault_predictions.append(predicted_class)
-            fault_labels.append(label)
-            
-            if (i + 1) % 10 == 0:
-                print(f"  Procesadas {i + 1}/{len(indices)} muestras con pesos modificados")
-        
-        # 5. Restaurar pesos originales
+        # 6. Restaurar pesos originales
         print("🔄 Restaurando pesos originales...")
         self.weight_fault_injector.restore_original_weights(self.model)
         
-        # 6. Calcular métricas
-        print(f"🔍 DEBUG: Calculando métricas golden con {len(golden_labels)} etiquetas y {len(golden_predictions)} predicciones")
-        golden_metrics = self.calculate_metrics(golden_labels, golden_predictions)
-        print(f"🔍 DEBUG: Métricas golden calculadas: {golden_metrics}")
+        # 6.5. Comparar predicciones antes de calcular métricas
+        print("🔍 DEBUG: Comparando predicciones individuales:")
+        print(f"🔍 DEBUG: Golden predictions: {golden_predictions}")
+        print(f"🔍 DEBUG: Fault predictions:  {fault_predictions}")
+        differences = [i for i in range(len(golden_predictions)) if golden_predictions[i] != fault_predictions[i]]
+        print(f"🔍 DEBUG: Diferencias en índices: {differences}")
+        print(f"🔍 DEBUG: Total de diferencias: {len(differences)}/{len(golden_predictions)}")
         
-        print(f"🔍 DEBUG: Calculando métricas con fallos con {len(fault_labels)} etiquetas y {len(fault_predictions)} predicciones")
-        fault_metrics = self.calculate_metrics(fault_labels, fault_predictions)
-        print(f"🔍 DEBUG: Métricas con fallos calculadas: {fault_metrics}")
-        
-        # 7. Comparar resultados
-        comparison = self._compare_predictions(golden_predictions, fault_predictions)
-        print(f"🔍 DEBUG: Comparación calculada: {comparison}")
-        
+        # 7. Crear resultados usando función auxiliar
         execution_time = time.time() - start_time
-        
-        results = {
-            'golden_results': {
-                'predictions': golden_predictions,
-                'labels': golden_labels,
-                'metrics': golden_metrics
-            },
-            'fault_results': {
-                'predictions': fault_predictions,
-                'labels': fault_labels,
-                'metrics': fault_metrics
-            },
-            'comparison': comparison,
-            'campaign_info': {
-                'session_id': self.session_id,
-                'model_path': self.model_path,
-                'num_samples': num_samples,
-                'execution_time_seconds': execution_time,
-                'weight_fault_config': weight_fault_config
-            }
-        }
-        
-        print(f"🔍 DEBUG: Estructura final de resultados:")
-        print(f"  - Golden metrics keys: {list(golden_metrics.keys()) if golden_metrics else 'None'}")
-        print(f"  - Fault metrics keys: {list(fault_metrics.keys()) if fault_metrics else 'None'}")
-        print(f"  - Comparison keys: {list(comparison.keys()) if comparison else 'None'}")
+        results = self._create_campaign_results(
+            golden_predictions, golden_labels,
+            fault_predictions, fault_labels,
+            num_samples, execution_time,
+            weight_fault_config, 'weight_fault_config'
+        )
         
         print(f"✅ Campaña de fallos en pesos completada en {execution_time:.2f} segundos")
         return results
@@ -369,35 +422,14 @@ class FaultCampaign:
         # 2. Ejecutar inferencia con fallos
         fault_predictions, fault_labels = self.run_fault_inference(num_samples, fault_config)
         
-        # 3. Calcular métricas
-        golden_metrics = self.calculate_metrics(golden_labels, golden_predictions)
-        fault_metrics = self.calculate_metrics(fault_labels, fault_predictions)
-        
-        # 4. Comparar resultados
-        comparison = self._compare_predictions(golden_predictions, fault_predictions)
-        
+        # 3. Crear resultados usando función auxiliar
         execution_time = time.time() - start_time
-        
-        results = {
-            'golden_results': {
-                'predictions': golden_predictions,
-                'labels': golden_labels,
-                'metrics': golden_metrics
-            },
-            'fault_results': {
-                'predictions': fault_predictions,
-                'labels': fault_labels,
-                'metrics': fault_metrics
-            },
-            'comparison': comparison,
-            'campaign_info': {
-                'session_id': self.session_id,
-                'model_path': self.model_path,
-                'num_samples': num_samples,
-                'execution_time_seconds': execution_time,
-                'fault_config': fault_config
-            }
-        }
+        results = self._create_campaign_results(
+            golden_predictions, golden_labels,
+            fault_predictions, fault_labels,
+            num_samples, execution_time,
+            fault_config, 'fault_config'
+        )
         
         print(f"✅ Campaña de fallos completada en {execution_time:.2f} segundos")
         return results

@@ -19,8 +19,16 @@ class ManualInference:
     y generar archivos Excel e imágenes de cada capa.
     """
     
-    def __init__(self, model_path: str, output_dir: str = "layer_outputs", session_id: str = None, fault_config: Dict[str, Any] = None):
-        self.model = tf.keras.models.load_model(model_path)
+    def __init__(self, model_path: str = None, output_dir: str = "layer_outputs", session_id: str = None, fault_config: Dict[str, Any] = None, model_instance: tf.keras.Model = None):
+        # Usar instancia del modelo si se proporciona, sino cargar desde ruta
+        if model_instance is not None:
+            self.model = model_instance
+            print("🔧 DEBUG ManualInference: Usando instancia de modelo proporcionada")
+        elif model_path is not None:
+            self.model = tf.keras.models.load_model(model_path)
+            print(f"🔧 DEBUG ManualInference: Cargando modelo desde {model_path}")
+        else:
+            raise ValueError("Debe proporcionar model_path o model_instance")
         
         # Generar ID único de sesión si no se proporciona
         if session_id is None:
@@ -483,7 +491,6 @@ class ManualInference:
         # Preprocesar imagen
         imagen = self.preprocess_image(image_data)
         imagen_procesada = imagen[0, :, :, 0]  # (32, 32)
-        print(f"🔍 DEBUG: imagen_procesada shape: {imagen_procesada.shape}")
         
         results = {
             "layer_outputs": {},
@@ -497,7 +504,6 @@ class ManualInference:
         filters1, biases1 = conv_layer1.get_weights()
         
         feature_maps1 = self.conv2d_manual(imagen_procesada, filters1, biases1)
-        print(f"🔍 DEBUG: feature_maps1 shape después de conv2d: {feature_maps1.shape}")
         feature_maps1 = self.relu_activation(feature_maps1)
         
         # Aplicar inyección de fallos si está habilitada
@@ -517,7 +523,6 @@ class ManualInference:
         strides1 = pool_layer1.strides
         
         pooled_maps1 = self.maxpool2d_manual(feature_maps1, pool_size1, strides1)
-        print(f"🔍 DEBUG: pooled_maps1 shape después de maxpool: {pooled_maps1.shape}")
         
         # Aplicar inyección de fallos si está habilitada
         pooled_maps1 = self.apply_fault_injection(pooled_maps1, "maxpooling2d_1")
@@ -535,7 +540,6 @@ class ManualInference:
         filters2, biases2 = conv_layer2.get_weights()
         
         feature_maps2 = self.conv2d_manual(pooled_maps1, filters2, biases2)
-        print(f"🔍 DEBUG: feature_maps2 shape después de conv2d_2: {feature_maps2.shape}")
         feature_maps2 = self.relu_activation(feature_maps2)
         
         # Aplicar inyección de fallos si está habilitada
@@ -555,7 +559,6 @@ class ManualInference:
         strides2 = pool_layer2.strides
         
         pooled_maps2 = self.maxpool2d_manual(feature_maps2, pool_size2, strides2)
-        print(f"🔍 DEBUG: pooled_maps2 shape después de maxpool_2: {pooled_maps2.shape}")
         
         # Aplicar inyección de fallos si está habilitada
         pooled_maps2 = self.apply_fault_injection(pooled_maps2, "maxpooling2d_2")
@@ -569,9 +572,7 @@ class ManualInference:
         results["image_files"].extend(image_files_pool2)
         
         # ==================== FLATTEN ====================
-        print(f"🔍 DEBUG: pooled_maps2 shape antes de flatten: {pooled_maps2.shape}")
         flatten_output = pooled_maps2.flatten()
-        print(f"🔍 DEBUG: flatten_output shape: {flatten_output.shape}")
         
         # Aplicar inyección de fallos si está habilitada
         flatten_output = self.apply_fault_injection(flatten_output, "flatten")
@@ -584,8 +585,6 @@ class ManualInference:
         # ==================== PRIMERA CAPA DENSA (120 neuronas) ====================
         dense_layer1 = self.model.layers[5]
         weights1, biases1_dense = dense_layer1.get_weights()
-        print(f"🔍 DEBUG: weights1 shape: {weights1.shape}")
-        print(f"🔍 DEBUG: flatten_output shape antes de dense: {flatten_output.shape}")
         
         dense_output1 = self.dense_manual(flatten_output, weights1, biases1_dense)
         dense_output1 = self.relu_activation(dense_output1)
