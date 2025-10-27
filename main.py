@@ -1884,8 +1884,8 @@ def replace_bias_with_golden_value(content: str, bias_name: str, golden_value: s
     """
     import re
     
-    # Buscar la definición del bias en el VHDL
-    pattern = rf'constant {bias_name}: std_logic_vector\(\d+ downto 0\) := "([^"]+)";'
+    # Buscar la definición del bias en el VHDL (usando signed en lugar de std_logic_vector)
+    pattern = rf'constant {bias_name}: signed \(\d+ downto 0\) := "([^"]+)";'
     match = re.search(pattern, content)
     
     if not match:
@@ -1893,10 +1893,12 @@ def replace_bias_with_golden_value(content: str, bias_name: str, golden_value: s
         return content
     
     print(f"✅ Encontrado bias {bias_name}")
+    print(f"🔄 Valor actual: {match.group(1)}")
+    print(f"🔄 Valor golden: {golden_value}")
     
     # Construir la nueva definición del bias con el valor golden
     bit_width = len(match.group(1))
-    new_bias_definition = f'constant {bias_name}: std_logic_vector({bit_width-1} downto 0) := "{golden_value}";'
+    new_bias_definition = f'constant {bias_name}: signed ({bit_width-1} downto 0) := "{golden_value}";'
     
     # Reemplazar en el contenido
     return content.replace(match.group(0), new_bias_definition)
