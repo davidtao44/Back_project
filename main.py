@@ -20,9 +20,6 @@ import subprocess
 # Importar desde nuestros módulos
 from models import ImageToVHDLRequest, FaultInjectorRequest, FaultInjectorInferenceRequest, FaultInjectionConfig
 
-# Importar la función de cuantización
-from model_quantization import modify_and_save_weights
-
 # Importar bibliotecas adicionales si no están ya importadas
 import keras
 
