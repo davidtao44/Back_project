@@ -34,6 +34,43 @@ from vhdl_hardware.vhdl_weight_modifier import VHDLWeightModifier
 from vhdl_hardware.vivado_controller import VivadoController
 from vhdl_hardware.csv_processor import CSVProcessor
 
+# Importar módulos de autenticación
+from auth import (
+    UserCreate, UserLogin, Token, authenticate_user, create_access_token,
+    get_current_user, create_user, ACCESS_TOKEN_EXPIRE_MINUTES,
+    initialize_default_users
+)
+
+# Importar autenticación con Google
+from google_auth import (
+    GoogleAuthRequest, authenticate_with_google, logout_user,
+    get_current_user as get_current_google_user
+)
+
+# Importar configuración de Firebase
+from firebase_config import initialize_firestore
+
+app = FastAPI()
+
+# Inicializar Firestore y usuarios por defecto
+try:
+    initialize_firestore()
+    initialize_default_users()
+    print("✅ Firestore inicializado correctamente")
+except Exception as e:
+    print(f"⚠️ Advertencia: No se pudo inicializar Firestore: {str(e)}")
+    print("   Asegúrate de tener el archivo de credenciales de Firebase")
+
+# Configurar CORS para permitir peticiones desde el frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # permite toda ruta
+    allow_credentials=True,
+    allow_methods=["*"],  # Permitir todos los métodos (GET, POST, etc.)
+    allow_headers=["*"],  # Permitir todos los encabezados
+)
+
+
 def sanitize_for_json(obj):
     """
     Recursivamente limpia un objeto para asegurar que sea serializable a JSON.
@@ -78,44 +115,6 @@ def sanitize_for_json(obj):
             return str(obj)
         except:
             return "unknown_type"
-
-# Importar módulos de autenticación
-from auth import (
-    UserCreate, UserLogin, Token, authenticate_user, create_access_token,
-    get_current_user, create_user, ACCESS_TOKEN_EXPIRE_MINUTES,
-    initialize_default_users
-)
-
-# Importar autenticación con Google
-from google_auth import (
-    GoogleAuthRequest, authenticate_with_google, logout_user,
-    get_current_user as get_current_google_user
-)
-
-# Importar configuración de Firebase
-from firebase_config import initialize_firestore
-
-app = FastAPI()
-
-# Inicializar Firestore y usuarios por defecto
-try:
-    initialize_firestore()
-    initialize_default_users()
-    print("✅ Firestore inicializado correctamente")
-except Exception as e:
-    print(f"⚠️ Advertencia: No se pudo inicializar Firestore: {str(e)}")
-    print("   Asegúrate de tener el archivo de credenciales de Firebase")
-
-# Configurar CORS para permitir peticiones desde el frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # permite toda ruta
-    allow_credentials=True,
-    allow_methods=["*"],  # Permitir todos los métodos (GET, POST, etc.)
-    allow_headers=["*"],  # Permitir todos los encabezados
-)
-
-
 
 @app.get("/")
 def read_root():
@@ -1277,7 +1276,7 @@ async def inject_vhdl_faults(
                             if csv_files:
                                 print(f"✅ Encontrados {len(csv_files)} archivos CSV para procesar")
                                 # Importar el procesador CSV
-                                from vhdl_hardware.csv_processor import CSVProcessor
+                               
                                 
                                 csv_processor = CSVProcessor()
                                 processed_results = []
