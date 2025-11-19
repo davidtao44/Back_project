@@ -1246,14 +1246,28 @@ async def inject_vhdl_faults(
                     else:
                         print("✅ elaborate.sh ejecutado exitosamente")
                         
-                        # 3. Ejecutar simulate.sh
-                        print("🔧 Ejecutando simulate.sh...")
-                        simulate_result = subprocess.run(
-                            ["bash", simulation_script],
-                            cwd=sim_dir,
-                            capture_output=True,
-                            text=True,
-                            timeout=600  # 10 minutos de timeout
+                        # 3. Ejecutar simulación no-gráfica con xsim directo
+                        print("🔧 Ejecutando simulación no-gráfica...")
+                        
+                        # Terminar procesos xsim existentes que puedan estar bloqueando
+                        subprocess.run(["pkill", "-f", "xsim.*CONV1_SAB_STUCKAT_DEC_RAM_TB_behav"], 
+                                     capture_output=True)
+                        
+                        # Ejecutar xsim directamente con archivo TCL batch (no-gráfico)
+                        env = os.environ.copy()
+                        env.pop('DISPLAY', None)  # Asegurar que no hay variable DISPLAY
+                        
+                        simulate_result = subprocess.run([
+                            "xsim", 
+                            "CONV1_SAB_STUCKAT_DEC_RAM_TB_behav",
+                            "-tclbatch", "CONV1_SAB_STUCKAT_DEC_RAM_TB_batch.tcl",
+                            "-log", "simulation.log"
+                        ], 
+                        cwd=sim_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,  # 2 minutos de timeout
+                        env=env
                         )
                         
                         if simulate_result.returncode == 0:
@@ -1484,14 +1498,28 @@ async def golden_simulation(current_user: dict = Depends(get_current_user)):
                     if elaborate_result.returncode == 0:
                         print("✅ elaborate.sh ejecutado exitosamente")
                         
-                        # Ejecutar simulate.sh
-                        print("⚡ Ejecutando simulate.sh...")
-                        simulate_result = subprocess.run(
-                            ["bash", simulation_script],
-                            cwd=base_dir,
-                            capture_output=True,
-                            text=True,
-                            timeout=600
+                        # Ejecutar simulación no-gráfica con xsim directo
+                        print("⚡ Ejecutando simulación no-gráfica...")
+                        
+                        # Terminar procesos xsim existentes que puedan estar bloqueando
+                        subprocess.run(["pkill", "-f", "xsim.*CONV1_SAB_STUCKAT_DEC_RAM_TB_behav"], 
+                                     capture_output=True)
+                        
+                        # Ejecutar xsim directamente con archivo TCL batch (no-gráfico)
+                        env = os.environ.copy()
+                        env.pop('DISPLAY', None)  # Asegurar que no hay variable DISPLAY
+                        
+                        simulate_result = subprocess.run([
+                            "xsim", 
+                            "CONV1_SAB_STUCKAT_DEC_RAM_TB_behav",
+                            "-tclbatch", "CONV1_SAB_STUCKAT_DEC_RAM_TB_batch.tcl",
+                            "-log", "simulation.log"
+                        ], 
+                        cwd=base_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,  # 2 minutos de timeout
+                        env=env
                         )
                         
                         if simulate_result.returncode == 0:
