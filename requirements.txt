@@ -6,6 +6,7 @@ pillow
 numpy
 python-multipart
 python-jose[cryptography]
+bcrypt==4.0.1
 passlib[bcrypt]
 python-multipart
 firebase-admin
@@ -17,5 +18,6 @@ python-dotenv
 openpyxl
 opencv-python
 scipy
+scikit-learn
 pandas
 matplotlib
