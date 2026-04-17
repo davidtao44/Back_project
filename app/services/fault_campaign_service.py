@@ -7,9 +7,10 @@ orquestadoras para los endpoints de ruta.
 import io
 import json
 import os
+import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import tensorflow as tf
@@ -21,6 +22,38 @@ from app.schemas.fault import FaultCampaignRequest, WeightFaultCampaignRequest
 from app.utils.json_utils import sanitize_for_json
 from fault_injection.manual_inference import ManualInference
 from fault_injection.weight_fault_injector import WeightFaultInjector
+
+# ── Job store (in-memory) ─────────────────────────────────────────────────────
+_job_store: Dict[str, Dict] = {}
+_job_lock = threading.Lock()
+
+
+def _update_job(job_id: str, **kwargs) -> None:
+    with _job_lock:
+        if job_id in _job_store:
+            _job_store[job_id].update(kwargs)
+
+
+def get_job_status(job_id: str) -> Optional[Dict]:
+    with _job_lock:
+        job = _job_store.get(job_id)
+    if not job:
+        return None
+    return {
+        "job_id": job_id,
+        "status": job["status"],        # pending | running | done | error
+        "progress": job["progress"],    # 0-100
+        "phase": job["phase"],
+        "error": job.get("error"),
+    }
+
+
+def get_job_results(job_id: str) -> Optional[Dict]:
+    with _job_lock:
+        job = _job_store.get(job_id)
+    if not job:
+        return None
+    return job.get("results")
 
 
 class FaultCampaign:
@@ -247,14 +280,26 @@ class FaultCampaign:
         print(f"✅ Inferencia con fallos completada: {len(predictions)} predicciones")
         return predictions, labels
 
-    def run_weight_fault_campaign(self, num_samples: int, weight_fault_config: Dict[str, Any]) -> Dict[str, Any]:
+    def run_weight_fault_campaign(
+        self,
+        num_samples: int,
+        weight_fault_config: Dict[str, Any],
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> Dict[str, Any]:
+        def cb(pct: int, phase: str):
+            if progress_callback:
+                progress_callback(pct, phase)
+
         print("🎯 Iniciando campaña de fallos en pesos...")
         start_time = time.time()
 
+        cb(5, "Cargando imágenes y modelo")
         golden_predictions, golden_labels = self.run_golden_inference(num_samples)
+        cb(35, "Inferencia golden completada")
 
         print("💾 Haciendo backup de pesos originales...")
         self.weight_fault_injector.backup_original_weights(self.model)
+        cb(40, "Configurando inyección de fallos en pesos")
 
         print("🔧 Configurando inyección de fallos en pesos...")
         for layer_name, layer_config in weight_fault_config.get("layers", {}).items():
@@ -263,24 +308,22 @@ class FaultCampaign:
         print("⚡ Aplicando fallos en pesos del modelo...")
         injected_weight_faults = self.weight_fault_injector.inject_faults_in_weights(self.model)
         print(f"✅ Inyectados {len(injected_weight_faults)} fallos en pesos")
+        cb(50, "Inyectando fallos y ejecutando inferencia")
 
         print("🔍 Ejecutando inferencia con pesos modificados...")
         if not hasattr(self, "selected_indices"):
             raise ValueError("❌ ERROR: No se han seleccionado índices en la inferencia golden")
-        print(f"🔍 DEBUG: Usando los mismos índices que golden: {self.selected_indices[:5]}...")
         fault_predictions, fault_labels = self._perform_inference_on_samples(
             self.selected_indices, "con pesos modificados"
         )
+        cb(80, "Inferencia con fallos completada")
 
         print("🔄 Restaurando pesos originales...")
         self.weight_fault_injector.restore_original_weights(self.model)
 
-        print("🔍 DEBUG: Comparando predicciones individuales:")
-        print(f"🔍 DEBUG: Golden predictions: {golden_predictions}")
-        print(f"🔍 DEBUG: Fault predictions:  {fault_predictions}")
         differences = [i for i in range(len(golden_predictions)) if golden_predictions[i] != fault_predictions[i]]
-        print(f"🔍 DEBUG: Diferencias en índices: {differences}")
         print(f"🔍 DEBUG: Total de diferencias: {len(differences)}/{len(golden_predictions)}")
+        cb(90, "Calculando métricas y resultados")
 
         execution_time = time.time() - start_time
         results = self._create_campaign_results(
@@ -294,6 +337,7 @@ class FaultCampaign:
             "weight_fault_config",
         )
 
+        cb(100, "¡Campaña completada!")
         print(f"✅ Campaña de fallos en pesos completada en {execution_time:.2f} segundos")
         return results
 
@@ -423,3 +467,51 @@ def run_weight_fault_campaign_request(request: WeightFaultCampaignRequest, curre
         raise HTTPException(
             status_code=500, detail=f"Error ejecutando campaña de fallos en pesos: {str(e)}"
         )
+
+
+def start_weight_fault_campaign_job(request: WeightFaultCampaignRequest, current_user: dict) -> str:
+    """Lanza la campaña en un hilo separado y devuelve el job_id inmediatamente."""
+    job_id = str(uuid.uuid4())
+
+    with _job_lock:
+        _job_store[job_id] = {
+            "status": "pending",
+            "progress": 0,
+            "phase": "En cola...",
+            "results": None,
+            "error": None,
+        }
+
+    def _run():
+        _update_job(job_id, status="running", progress=0, phase="Iniciando campaña...")
+        try:
+            if not os.path.exists(request.model_path):
+                raise ValueError(f"Modelo no encontrado: {request.model_path}")
+
+            def on_progress(pct: int, phase: str):
+                _update_job(job_id, progress=pct, phase=phase)
+
+            campaign = FaultCampaign(model_path=request.model_path, image_dir=request.image_dir)
+            results = campaign.run_weight_fault_campaign(
+                num_samples=request.num_samples,
+                weight_fault_config=request.weight_fault_config,
+                progress_callback=on_progress,
+            )
+            _update_job(
+                job_id,
+                status="done",
+                progress=100,
+                phase="¡Campaña completada!",
+                results={
+                    "success": True,
+                    "message": "Campaña de fallos en pesos ejecutada exitosamente",
+                    "results": sanitize_for_json(results),
+                },
+            )
+        except Exception as e:
+            print(f"❌ Error en job {job_id}: {str(e)}")
+            _update_job(job_id, status="error", phase="Error", error=str(e))
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return job_id
