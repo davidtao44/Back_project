@@ -201,7 +201,7 @@ class FaultCampaign:
         fault_metrics = self.calculate_metrics(fault_labels, fault_predictions)
         print(f"🔍 DEBUG: Métricas con fallos calculadas: {fault_metrics}")
 
-        comparison = self._compare_predictions(golden_predictions, fault_predictions)
+        comparison = self._compare_predictions(golden_predictions, fault_predictions, labels=golden_labels)
         print(f"🔍 DEBUG: Comparación calculada: {comparison}")
 
         results = {
@@ -383,21 +383,42 @@ class FaultCampaign:
         }
 
     def _compare_predictions(
-        self, golden_predictions: List[int], fault_predictions: List[int]
+        self,
+        golden_predictions: List[int],
+        fault_predictions: List[int],
+        labels: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         golden_array = np.array(golden_predictions)
         fault_array = np.array(fault_predictions)
+        n = len(golden_predictions)
 
         same_predictions = np.sum(golden_array == fault_array)
         different_predictions = np.sum(golden_array != fault_array)
         different_indices = np.where(golden_array != fault_array)[0].tolist()
 
-        return {
+        # Factor de Propagación: fracción de inyecciones que cambian la salida de la red
+        propagation_factor = float(different_predictions / n) if n > 0 else 0.0
+
+        result = {
             "samples_with_same_predictions": int(same_predictions),
             "samples_with_different_predictions": int(different_predictions),
-            "percentage_different": float(different_predictions / len(golden_predictions) * 100),
+            "percentage_different": float(different_predictions / n * 100),
             "different_prediction_indices": different_indices,
+            "propagation_factor": round(propagation_factor, 6),
         }
+
+        if labels is not None:
+            labels_array = np.array(labels)
+            # Muestras en que el golden era correcto Y con fallo se volvió incorrecto
+            golden_correct = golden_array == labels_array
+            fault_wrong = fault_array != labels_array
+            fault_induced = int(np.sum(golden_correct & fault_wrong))
+            misclassification_factor = float(fault_induced / n) if n > 0 else 0.0
+
+            result["fault_induced_misclassifications"] = fault_induced
+            result["misclassification_factor"] = round(misclassification_factor, 6)
+
+        return result
 
     def save_results(self, results: Dict[str, Any], output_file: str = None) -> str:
         if output_file is None:
