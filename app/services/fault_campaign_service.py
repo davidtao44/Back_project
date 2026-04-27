@@ -413,7 +413,7 @@ class FaultCampaign:
             golden_correct = golden_array == labels_array
             fault_wrong = fault_array != labels_array
             fault_induced = int(np.sum(golden_correct & fault_wrong))
-            misclassification_factor = float(fault_induced / n) if n > 0 else 0.0
+            misclassification_factor = float(fault_induced / different_predictions) if different_predictions > 0 else 0.0
 
             result["fault_induced_misclassifications"] = fault_induced
             result["misclassification_factor"] = round(misclassification_factor, 6)
