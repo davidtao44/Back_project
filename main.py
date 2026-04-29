@@ -42,7 +42,7 @@ app.include_router(fault_campaign.router)
 
 if __name__ == "__main__":
     host = "0.0.0.0"
-    port = int(os.getenv("PORT", 8000))
+    port = int(os.getenv("PORT", 8002))
 
     print(f"Iniciando servidor en http://{host}:{port}")
     uvicorn.run(app, host=host, port=port)

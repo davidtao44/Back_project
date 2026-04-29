@@ -628,6 +628,9 @@ class ManualInference:
         results["layer_outputs"]["softmax"] = tuple(int(x) for x in softmax_output.shape)
         results["excel_files"].append(excel_file_softmax)
         
+        # Guardar dense_output3 (pre-softmax) para análisis de propagación
+        results["dense_output3"] = [float(x) for x in dense_output3]
+        
         # ==================== PREDICCIÓN FINAL ====================
         # Detectar errores numéricos en la salida de softmax
         softmax_errors = self.detect_numerical_errors(softmax_output, "predicción final")

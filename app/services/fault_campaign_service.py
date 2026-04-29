@@ -74,8 +74,8 @@ class FaultCampaign:
         self.weight_fault_injector = WeightFaultInjector()
 
         self.results = {
-            "golden": {"predictions": [], "labels": []},
-            "fault": {"predictions": [], "labels": []},
+            "golden": {"predictions": [], "labels": [], "dense_outputs": []},
+            "fault": {"predictions": [], "labels": [], "dense_outputs": []},
             "metrics": {},
         }
 
@@ -140,9 +140,10 @@ class FaultCampaign:
         image_pil.save(img_byte_arr, format="PNG")
         return img_byte_arr.getvalue()
 
-    def _perform_inference_on_samples(self, indices: np.ndarray, description: str) -> Tuple[List[int], List[int]]:
+    def _perform_inference_on_samples(self, indices: np.ndarray, description: str) -> Tuple[List[int], List[int], List[List[float]]]:
         predictions = []
         labels = []
+        dense_outputs = []
 
         if "con pesos modificados" in description:
             for layer in self.model.layers:
@@ -158,9 +159,11 @@ class FaultCampaign:
             image_bytes = self._convert_image_to_bytes(image)
             result = self.manual_inference.perform_manual_inference(image_bytes)
             predicted_class = result["final_prediction"]["predicted_class"]
+            dense_output3 = result.get("dense_output3", [])
 
             predictions.append(predicted_class)
             labels.append(label)
+            dense_outputs.append(dense_output3)
 
             if i < 3:
                 print(
@@ -174,7 +177,7 @@ class FaultCampaign:
                     f"Última predicción: {predicted_class}, Etiqueta real: {label}"
                 )
 
-        return predictions, labels
+        return predictions, labels, dense_outputs
 
     def _create_campaign_results(
         self,
@@ -186,6 +189,8 @@ class FaultCampaign:
         execution_time: float,
         config: Dict[str, Any],
         config_key: str,
+        golden_dense_outputs: Optional[List[List[float]]] = None,
+        fault_dense_outputs: Optional[List[List[float]]] = None,
     ) -> Dict[str, Any]:
         print(
             f"🔍 DEBUG: Calculando métricas golden con {len(golden_labels)} etiquetas "
@@ -201,7 +206,13 @@ class FaultCampaign:
         fault_metrics = self.calculate_metrics(fault_labels, fault_predictions)
         print(f"🔍 DEBUG: Métricas con fallos calculadas: {fault_metrics}")
 
-        comparison = self._compare_predictions(golden_predictions, fault_predictions, labels=golden_labels)
+        comparison = self._compare_predictions(
+            golden_predictions, 
+            fault_predictions, 
+            labels=golden_labels,
+            golden_dense_outputs=golden_dense_outputs,
+            fault_dense_outputs=fault_dense_outputs
+        )
         print(f"🔍 DEBUG: Comparación calculada: {comparison}")
 
         results = {
@@ -240,10 +251,11 @@ class FaultCampaign:
         )
         print(f"🔍 DEBUG: Índices seleccionados para golden: {self.selected_indices[:5]}...")
 
-        predictions, labels = self._perform_inference_on_samples(self.selected_indices, "golden")
+        predictions, labels, dense_outputs = self._perform_inference_on_samples(self.selected_indices, "golden")
 
         self.results["golden"]["predictions"] = predictions
         self.results["golden"]["labels"] = labels
+        self.results["golden"]["dense_outputs"] = dense_outputs
 
         print(f"✅ Inferencia golden completada: {len(predictions)} predicciones")
         return predictions, labels
@@ -255,6 +267,7 @@ class FaultCampaign:
 
         predictions = []
         labels = []
+        dense_outputs = []
 
         indices = np.random.choice(len(self.images), size=min(num_samples, len(self.images)), replace=False)
 
@@ -262,20 +275,21 @@ class FaultCampaign:
             image = self.images[idx]
             label = self.labels[idx]
 
-            if len(image.shape) == 2:
-                image = np.expand_dims(image, axis=-1)
-
-            result = self.manual_inference.perform_inference_with_faults(image)
-            predicted_class = result["predicted_class"]
+            image_bytes = self._convert_image_to_bytes(image)
+            result = self.manual_inference.perform_manual_inference(image_bytes)
+            predicted_class = result["final_prediction"]["predicted_class"]
+            dense_output3 = result.get("dense_output3", [])
 
             predictions.append(predicted_class)
             labels.append(label)
+            dense_outputs.append(dense_output3)
 
             if (i + 1) % 10 == 0:
                 print(f"  Procesadas {i + 1}/{len(indices)} muestras con fallos")
 
         self.results["fault"]["predictions"] = predictions
         self.results["fault"]["labels"] = labels
+        self.results["fault"]["dense_outputs"] = dense_outputs
 
         print(f"✅ Inferencia con fallos completada: {len(predictions)} predicciones")
         return predictions, labels
@@ -313,19 +327,35 @@ class FaultCampaign:
         print("🔍 Ejecutando inferencia con pesos modificados...")
         if not hasattr(self, "selected_indices"):
             raise ValueError("❌ ERROR: No se han seleccionado índices en la inferencia golden")
-        fault_predictions, fault_labels = self._perform_inference_on_samples(
+        fault_predictions, fault_labels, fault_dense_outputs = self._perform_inference_on_samples(
             self.selected_indices, "con pesos modificados"
         )
+        self.results["fault"]["predictions"] = fault_predictions
+        self.results["fault"]["labels"] = fault_labels
+        self.results["fault"]["dense_outputs"] = fault_dense_outputs
+        
         cb(80, "Inferencia con fallos completada")
 
         print("🔄 Restaurando pesos originales...")
         self.weight_fault_injector.restore_original_weights(self.model)
 
-        differences = [i for i in range(len(golden_predictions)) if golden_predictions[i] != fault_predictions[i]]
-        print(f"🔍 DEBUG: Total de diferencias: {len(differences)}/{len(golden_predictions)}")
+        golden_dense_outputs = self.results["golden"]["dense_outputs"]
+        differences = []
+        for i in range(len(golden_predictions)):
+            pred_changed = golden_predictions[i] != fault_predictions[i]
+            dense_changed = False
+            if golden_dense_outputs[i] and fault_dense_outputs[i]:
+                golden_vec = np.array(golden_dense_outputs[i])
+                fault_vec = np.array(fault_dense_outputs[i])
+                dense_changed = not np.allclose(golden_vec, fault_vec, rtol=1e-10, atol=1e-5)
+            if pred_changed or dense_changed:
+                differences.append(i)
+        print(f"🔍 DEBUG: Total de diferencias (pred o dense): {len(differences)}/{len(golden_predictions)}")
         cb(90, "Calculando métricas y resultados")
 
         execution_time = time.time() - start_time
+        golden_dense = self.results["golden"]["dense_outputs"]
+        fault_dense = self.results["fault"]["dense_outputs"]
         results = self._create_campaign_results(
             golden_predictions,
             golden_labels,
@@ -335,6 +365,8 @@ class FaultCampaign:
             execution_time,
             weight_fault_config,
             "weight_fault_config",
+            golden_dense_outputs=golden_dense,
+            fault_dense_outputs=fault_dense,
         )
 
         cb(100, "¡Campaña completada!")
@@ -349,6 +381,8 @@ class FaultCampaign:
         fault_predictions, fault_labels = self.run_fault_inference(num_samples, fault_config)
 
         execution_time = time.time() - start_time
+        golden_dense = self.results["golden"]["dense_outputs"]
+        fault_dense = self.results["fault"]["dense_outputs"]
         results = self._create_campaign_results(
             golden_predictions,
             golden_labels,
@@ -358,6 +392,8 @@ class FaultCampaign:
             execution_time,
             fault_config,
             "fault_config",
+            golden_dense_outputs=golden_dense,
+            fault_dense_outputs=fault_dense,
         )
 
         print(f"✅ Campaña de fallos completada en {execution_time:.2f} segundos")
@@ -387,24 +423,46 @@ class FaultCampaign:
         golden_predictions: List[int],
         fault_predictions: List[int],
         labels: Optional[List[int]] = None,
+        golden_dense_outputs: Optional[List[List[float]]] = None,
+        fault_dense_outputs: Optional[List[List[float]]] = None,
     ) -> Dict[str, Any]:
         golden_array = np.array(golden_predictions)
         fault_array = np.array(fault_predictions)
         n = len(golden_predictions)
 
         same_predictions = np.sum(golden_array == fault_array)
-        different_predictions = np.sum(golden_array != fault_array)
-        different_indices = np.where(golden_array != fault_array)[0].tolist()
+        different_predictions_class = np.sum(golden_array != fault_array)
+        different_indices_class = np.where(golden_array != fault_array)[0].tolist()
+
+        different_predictions = different_predictions_class
+        different_indices = different_indices_class
+
+        if golden_dense_outputs and fault_dense_outputs:
+            dense_change_count = 0
+            dense_change_indices = []
+            for i in range(n):
+                if golden_dense_outputs[i] and fault_dense_outputs[i]:
+                    golden_vec = np.array(golden_dense_outputs[i])
+                    fault_vec = np.array(fault_dense_outputs[i])
+                    if np.any(golden_vec != fault_vec):
+                        dense_change_count += 1
+                        if i not in different_indices:
+                            different_indices.append(i)
+            
+            different_predictions = dense_change_count
+            print(f"🔍 DEBUG: Cambios en predicción: {different_predictions_class}, cambios en dense_output3: {dense_change_count}")
 
         # Factor de Propagación: fracción de inyecciones que cambian la salida de la red
+        # Considera tanto cambios en predicción final como cambios en dense_output3
         propagation_factor = float(different_predictions / n) if n > 0 else 0.0
 
         result = {
-            "samples_with_same_predictions": int(same_predictions),
+            "samples_with_same_predictions": int(n - different_predictions),
             "samples_with_different_predictions": int(different_predictions),
             "percentage_different": float(different_predictions / n * 100),
             "different_prediction_indices": different_indices,
             "propagation_factor": round(propagation_factor, 6),
+            "propagation_by_prediction_change": round(float(different_predictions_class / n) if n > 0 else 0.0, 6),
         }
 
         if labels is not None:
