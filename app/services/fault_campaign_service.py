@@ -18,7 +18,12 @@ from fastapi import HTTPException
 from PIL import Image as PILImage
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, precision_score
 
-from app.schemas.fault import FaultCampaignRequest, WeightFaultCampaignRequest
+from app.schemas.fault import (
+    FaultCampaignRequest,
+    StuckAtAsymmetryRequest,
+    WeightFaultCampaignRequest,
+)
+from app.services.sai_service import compute_sai_from_runs
 from app.utils.json_utils import sanitize_for_json
 from fault_injection.manual_inference import ManualInference
 from fault_injection.weight_fault_injector import WeightFaultInjector
@@ -478,6 +483,189 @@ class FaultCampaign:
 
         return result
 
+    # ── SAI (Stuck-at Asymmetry Index) ────────────────────────────────────
+    def _force_fault_type(self, base_config: Dict[str, Any], fault_type: str) -> Dict[str, Any]:
+        """Clone base_config forcing fault_type on every layer."""
+        cloned: Dict[str, Any] = {"layers": {}}
+        for layer_name, layer_cfg in base_config.get("layers", {}).items():
+            new_cfg = dict(layer_cfg)
+            new_cfg["fault_type"] = fault_type
+            cloned["layers"][layer_name] = new_cfg
+        for k, v in base_config.items():
+            if k != "layers":
+                cloned[k] = v
+        return cloned
+
+    def _run_stuck_at_against_golden(
+        self,
+        golden_predictions: List[int],
+        golden_labels: List[int],
+        golden_dense_outputs: List[List[float]],
+        weight_fault_config: Dict[str, Any],
+        phase_label: str,
+    ) -> Dict[str, Any]:
+        """Run a single stuck-at sub-campaign reusing the golden inference.
+
+        Assumes self.selected_indices is already populated and that
+        weights have been backed up by the caller (so we can restore here).
+        """
+        self.weight_fault_injector.clear_faults()
+        for layer_name, layer_cfg in weight_fault_config.get("layers", {}).items():
+            self.weight_fault_injector.configure_fault(layer_name, layer_cfg)
+
+        injected = self.weight_fault_injector.inject_faults_in_weights(self.model)
+        print(f"⚡ [{phase_label}] inyectados {len(injected)} fallos en pesos")
+
+        try:
+            fault_predictions, fault_labels, fault_dense = self._perform_inference_on_samples(
+                self.selected_indices, phase_label
+            )
+        finally:
+            self.weight_fault_injector.restore_original_weights(self.model)
+
+        comparison = self._compare_predictions(
+            golden_predictions,
+            fault_predictions,
+            labels=golden_labels,
+            golden_dense_outputs=golden_dense_outputs,
+            fault_dense_outputs=fault_dense,
+        )
+
+        n_inj = len(fault_predictions)
+        n_prop = comparison["samples_with_different_predictions"]
+        n_misc = comparison.get("fault_induced_misclassifications", 0)
+        return {
+            "comparison": comparison,
+            "n_inj": int(n_inj),
+            "n_prop": int(n_prop),
+            "n_misc": int(n_misc),
+            "injected_faults_count": len(injected),
+            "fault_predictions": fault_predictions,
+        }
+
+    def run_stuck_at_asymmetry_campaign(
+        self,
+        num_samples: int,
+        base_config: Dict[str, Any],
+        granularity: str = "global",
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> Dict[str, Any]:
+        """Run paired stuck-at-0 / stuck-at-1 campaigns and compute SAI.
+
+        Both sub-campaigns reuse the same `selected_indices` and the same
+        weight positions/bits — only the fault_type changes. This keeps the
+        SAI comparison fair.
+
+        Args:
+            num_samples: number of inference samples per sub-campaign.
+            base_config: weight_fault_config-style dict
+                ({"layers": {layer_name: {target_type, positions, bit_positions}}}).
+                fault_type, if present, is overridden.
+            granularity: "global" → one paired sweep over all layers in
+                base_config; "per_layer" → also runs an isolated paired
+                sweep per layer.
+        """
+        if granularity not in {"global", "per_layer"}:
+            raise ValueError(f"granularity inválida: {granularity}")
+        if not base_config.get("layers"):
+            raise ValueError("base_config debe incluir al menos una capa en 'layers'")
+
+        def cb(pct: int, phase: str):
+            if progress_callback:
+                progress_callback(pct, phase)
+
+        print(f"🎯 Iniciando campaña SAI (granularity={granularity})...")
+        start_time = time.time()
+
+        cb(5, "Inferencia golden")
+        golden_predictions, golden_labels = self.run_golden_inference(num_samples)
+        golden_dense = self.results["golden"]["dense_outputs"]
+        cb(25, "Backup de pesos")
+        self.weight_fault_injector.backup_original_weights(self.model)
+
+        config_s0 = self._force_fault_type(base_config, "stuck_at_0")
+        config_s1 = self._force_fault_type(base_config, "stuck_at_1")
+
+        cb(35, "Sub-campaña stuck-at-0 (global)")
+        run_s0 = self._run_stuck_at_against_golden(
+            golden_predictions, golden_labels, golden_dense, config_s0, "stuck_at_0"
+        )
+        cb(60, "Sub-campaña stuck-at-1 (global)")
+        run_s1 = self._run_stuck_at_against_golden(
+            golden_predictions, golden_labels, golden_dense, config_s1, "stuck_at_1"
+        )
+
+        sai_global = compute_sai_from_runs(
+            {"n_inj": run_s0["n_inj"], "n_prop": run_s0["n_prop"], "n_misc": run_s0["n_misc"]},
+            {"n_inj": run_s1["n_inj"], "n_prop": run_s1["n_prop"], "n_misc": run_s1["n_misc"]},
+        )
+
+        per_layer_sai: List[Dict[str, Any]] = []
+        if granularity == "per_layer":
+            layers = list(base_config["layers"].keys())
+            for idx, layer_name in enumerate(layers):
+                pct = 60 + int(35 * (idx + 1) / max(len(layers), 1))
+                cb(pct, f"Sub-campaña por capa: {layer_name}")
+                single = {"layers": {layer_name: base_config["layers"][layer_name]}}
+                cfg_s0 = self._force_fault_type(single, "stuck_at_0")
+                cfg_s1 = self._force_fault_type(single, "stuck_at_1")
+                layer_run_s0 = self._run_stuck_at_against_golden(
+                    golden_predictions, golden_labels, golden_dense, cfg_s0,
+                    f"{layer_name}/s@0",
+                )
+                layer_run_s1 = self._run_stuck_at_against_golden(
+                    golden_predictions, golden_labels, golden_dense, cfg_s1,
+                    f"{layer_name}/s@1",
+                )
+                layer_summary = compute_sai_from_runs(
+                    {
+                        "n_inj": layer_run_s0["n_inj"],
+                        "n_prop": layer_run_s0["n_prop"],
+                        "n_misc": layer_run_s0["n_misc"],
+                    },
+                    {
+                        "n_inj": layer_run_s1["n_inj"],
+                        "n_prop": layer_run_s1["n_prop"],
+                        "n_misc": layer_run_s1["n_misc"],
+                    },
+                )
+                per_layer_sai.append({
+                    "layer": layer_name,
+                    "summary": layer_summary,
+                    "comparison_s0": layer_run_s0["comparison"],
+                    "comparison_s1": layer_run_s1["comparison"],
+                })
+
+        cb(98, "Calculando métricas finales")
+        execution_time = time.time() - start_time
+
+        results = {
+            "sai_global": sai_global,
+            "per_layer_sai": per_layer_sai,
+            "comparison_s0": run_s0["comparison"],
+            "comparison_s1": run_s1["comparison"],
+            "golden_results": {
+                "predictions": golden_predictions,
+                "labels": golden_labels,
+                "metrics": self.calculate_metrics(golden_labels, golden_predictions),
+            },
+            "campaign_info": {
+                "session_id": self.session_id,
+                "model_path": self.model_path,
+                "num_samples": num_samples,
+                "granularity": granularity,
+                "execution_time_seconds": execution_time,
+                "sai_config": base_config,
+            },
+        }
+
+        cb(100, "¡Campaña SAI completada!")
+        print(
+            f"✅ Campaña SAI completada en {execution_time:.2f}s — "
+            f"SAI_prop={sai_global['sai']} SAI_misc={sai_global['sai_misc']}"
+        )
+        return results
+
     def save_results(self, results: Dict[str, Any], output_file: str = None) -> str:
         if output_file is None:
             output_file = f"fault_campaign_results_{self.session_id}.json"
@@ -546,6 +734,84 @@ def run_weight_fault_campaign_request(request: WeightFaultCampaignRequest, curre
         raise HTTPException(
             status_code=500, detail=f"Error ejecutando campaña de fallos en pesos: {str(e)}"
         )
+
+
+def run_sai_campaign_request(request: StuckAtAsymmetryRequest, current_user: dict):
+    """Synchronous entry point for the SAI campaign."""
+    try:
+        print(
+            f"🎯 Iniciando campaña SAI para usuario: {current_user.get('username', 'unknown')}"
+        )
+        if not os.path.exists(request.model_path):
+            raise HTTPException(status_code=404, detail=f"Modelo no encontrado: {request.model_path}")
+
+        campaign = FaultCampaign(model_path=request.model_path, image_dir=request.image_dir)
+        results = campaign.run_stuck_at_asymmetry_campaign(
+            num_samples=request.num_samples,
+            base_config=request.base_config,
+            granularity=request.granularity,
+        )
+        return {
+            "success": True,
+            "message": "Campaña SAI ejecutada exitosamente",
+            "results": sanitize_for_json(results),
+        }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"❌ Error en campaña SAI: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error ejecutando campaña SAI: {str(e)}")
+
+
+def start_sai_campaign_job(request: StuckAtAsymmetryRequest, current_user: dict) -> str:
+    """Launch the SAI campaign in a background thread; return job_id."""
+    job_id = str(uuid.uuid4())
+
+    with _job_lock:
+        _job_store[job_id] = {
+            "status": "pending",
+            "progress": 0,
+            "phase": "En cola...",
+            "results": None,
+            "error": None,
+        }
+
+    def _run():
+        _update_job(job_id, status="running", progress=0, phase="Iniciando campaña SAI...")
+        try:
+            if not os.path.exists(request.model_path):
+                raise ValueError(f"Modelo no encontrado: {request.model_path}")
+
+            def on_progress(pct: int, phase: str):
+                _update_job(job_id, progress=pct, phase=phase)
+
+            campaign = FaultCampaign(model_path=request.model_path, image_dir=request.image_dir)
+            results = campaign.run_stuck_at_asymmetry_campaign(
+                num_samples=request.num_samples,
+                base_config=request.base_config,
+                granularity=request.granularity,
+                progress_callback=on_progress,
+            )
+            _update_job(
+                job_id,
+                status="done",
+                progress=100,
+                phase="¡Campaña SAI completada!",
+                results={
+                    "success": True,
+                    "message": "Campaña SAI ejecutada exitosamente",
+                    "results": sanitize_for_json(results),
+                },
+            )
+        except Exception as e:
+            print(f"❌ Error en job SAI {job_id}: {str(e)}")
+            _update_job(job_id, status="error", phase="Error", error=str(e))
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return job_id
 
 
 def start_weight_fault_campaign_job(request: WeightFaultCampaignRequest, current_user: dict) -> str:

@@ -1,12 +1,18 @@
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.schemas.fault import FaultCampaignRequest, WeightFaultCampaignRequest
+from app.schemas.fault import (
+    FaultCampaignRequest,
+    StuckAtAsymmetryRequest,
+    WeightFaultCampaignRequest,
+)
 from app.services.auth_service import get_current_user
 from app.services.fault_campaign_service import (
     get_job_results,
     get_job_status,
     run_activation_fault_campaign,
+    run_sai_campaign_request,
     run_weight_fault_campaign_request,
+    start_sai_campaign_job,
     start_weight_fault_campaign_job,
 )
 from app.services.model_service import get_available_models_for_campaign
@@ -26,6 +32,25 @@ async def run_weight_fault_campaign(
     request: WeightFaultCampaignRequest, current_user: dict = Depends(get_current_user)
 ):
     return run_weight_fault_campaign_request(request, current_user)
+
+
+# ── SAI (Stuck-at Asymmetry Index) ────────────────────────────────────────────
+
+@router.post("/fault_campaign/sai/run/")
+async def run_sai_campaign(
+    request: StuckAtAsymmetryRequest, current_user: dict = Depends(get_current_user)
+):
+    """Synchronous SAI campaign (paired stuck-at-0 / stuck-at-1)."""
+    return run_sai_campaign_request(request, current_user)
+
+
+@router.post("/fault_campaign/sai/start/")
+async def start_sai_campaign(
+    request: StuckAtAsymmetryRequest, current_user: dict = Depends(get_current_user)
+):
+    """Async SAI campaign — returns job_id; poll /status and /results."""
+    job_id = start_sai_campaign_job(request, current_user)
+    return {"job_id": job_id, "status": "pending"}
 
 
 # ── Async job endpoints ───────────────────────────────────────────────────────
