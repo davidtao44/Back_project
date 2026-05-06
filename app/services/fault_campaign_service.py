@@ -662,7 +662,7 @@ class FaultCampaign:
         cb(100, "¡Campaña SAI completada!")
         print(
             f"✅ Campaña SAI completada en {execution_time:.2f}s — "
-            f"SAI_prop={sai_global['sai']} SAI_misc={sai_global['sai_misc']}"
+            f"MAI_prop={sai_global['sai']} MAI_misc={sai_global['mai_misc']}"
         )
         return results
 

@@ -5,7 +5,7 @@ Two flavors are computed from each paired stuck-at-0 / stuck-at-1 campaign:
   SAI_prop = (F_prop_s@1 − F_prop_s@0) / (F_prop_s@1 + F_prop_s@0)
       F_prop = n_prop / n_inj           (any output change per injection)
 
-  SAI_misc = (F_misc_s@1 − F_misc_s@0) / (F_misc_s@1 + F_misc_s@0)
+  MAI_misc = (F_misc_s@1 − F_misc_s@0) / (F_misc_s@1 + F_misc_s@0)
       F_misc = n_misc / n_prop          (conditional: misclassification rate
                                          given the fault propagated)
 
@@ -76,7 +76,7 @@ def compute_sai_from_runs(run_s0: Dict[str, Any], run_s1: Dict[str, Any]) -> Dic
 
     f_misc_s0 = (n_misc_s0 / n_prop_s0) if n_prop_s0 > 0 else None
     f_misc_s1 = (n_misc_s1 / n_prop_s1) if n_prop_s1 > 0 else None
-    sai_misc = compute_sai(f_misc_s0, f_misc_s1)
+    mai_misc = compute_sai(f_misc_s0, f_misc_s1)
 
     return {
         "n_inj_s0": n_inj_s0,
@@ -90,7 +90,7 @@ def compute_sai_from_runs(run_s0: Dict[str, Any], run_s1: Dict[str, Any]) -> Dic
         "f_misc_s0": round(f_misc_s0, 6) if f_misc_s0 is not None else None,
         "f_misc_s1": round(f_misc_s1, 6) if f_misc_s1 is not None else None,
         "sai": round(sai_prop, 6) if sai_prop is not None else None,
-        "sai_misc": round(sai_misc, 6) if sai_misc is not None else None,
+        "mai_misc": round(mai_misc, 6) if mai_misc is not None else None,
         "interpretation": interpret_sai(sai_prop, "prop"),
-        "interpretation_misc": interpret_sai(sai_misc, "misc"),
+        "interpretation_misc": interpret_sai(mai_misc, "misc"),
     }
