@@ -24,6 +24,7 @@ from app.schemas.fault import (
     WeightFaultCampaignRequest,
 )
 from app.services.sai_service import compute_sai_from_runs
+from app.utils.campaign_store import save_sai_campaign
 from app.utils.json_utils import sanitize_for_json
 from fault_injection.manual_inference import ManualInference
 from fault_injection.weight_fault_injector import WeightFaultInjector
@@ -540,6 +541,7 @@ class FaultCampaign:
             "n_prop": int(n_prop),
             "n_misc": int(n_misc),
             "injected_faults_count": len(injected),
+            "injected_faults": injected,
             "fault_predictions": fault_predictions,
         }
 
@@ -657,6 +659,8 @@ class FaultCampaign:
                 "execution_time_seconds": execution_time,
                 "sai_config": base_config,
             },
+            "_faults_s0": run_s0.get("injected_faults", []),
+            "_faults_s1": run_s1.get("injected_faults", []),
         }
 
         cb(100, "¡Campaña SAI completada!")
@@ -736,6 +740,28 @@ def run_weight_fault_campaign_request(request: WeightFaultCampaignRequest, curre
         )
 
 
+def _maybe_persist_sai_campaign(results: Dict[str, Any], current_user: dict) -> None:
+    """Guarda la campaña SAI en el histórico solo si se inyectó exactamente 1 fallo.
+
+    Hace pop de `_faults_s0` y `_faults_s1` del dict de resultados antes de
+    devolverlo al frontend.
+    """
+    faults_s0 = results.pop("_faults_s0", []) or []
+    faults_s1 = results.pop("_faults_s1", []) or []
+    if len(faults_s0) == 1:
+        try:
+            username = (current_user or {}).get("username", "unknown")
+            campaign_id = save_sai_campaign(results, username, faults_s0, faults_s1)
+            print(f"💾 Campaña SAI guardada en histórico: {campaign_id}")
+        except Exception as e:
+            print(f"⚠️ Error guardando campaña SAI en histórico: {e}")
+    else:
+        print(
+            f"ℹ️ Campaña SAI no guardada en histórico "
+            f"(se requiere exactamente 1 fallo, hubo {len(faults_s0)})"
+        )
+
+
 def run_sai_campaign_request(request: StuckAtAsymmetryRequest, current_user: dict):
     """Synchronous entry point for the SAI campaign."""
     try:
@@ -751,6 +777,7 @@ def run_sai_campaign_request(request: StuckAtAsymmetryRequest, current_user: dic
             base_config=request.base_config,
             granularity=request.granularity,
         )
+        _maybe_persist_sai_campaign(results, current_user)
         return {
             "success": True,
             "message": "Campaña SAI ejecutada exitosamente",
@@ -794,6 +821,7 @@ def start_sai_campaign_job(request: StuckAtAsymmetryRequest, current_user: dict)
                 granularity=request.granularity,
                 progress_callback=on_progress,
             )
+            _maybe_persist_sai_campaign(results, current_user)
             _update_job(
                 job_id,
                 status="done",

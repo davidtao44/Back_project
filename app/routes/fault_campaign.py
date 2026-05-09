@@ -16,6 +16,7 @@ from app.services.fault_campaign_service import (
     start_weight_fault_campaign_job,
 )
 from app.services.model_service import get_available_models_for_campaign
+from app.utils.campaign_store import get_campaign_faults, get_campaigns_summary
 
 router = APIRouter(tags=["fault-campaign"])
 
@@ -92,3 +93,30 @@ async def get_available_models(current_user: dict = Depends(get_current_user)):
         raise HTTPException(
             status_code=500, detail=f"Error obteniendo modelos disponibles: {str(e)}"
         )
+
+
+# ── SAI history (solo se almacenan campañas con 1 fallo único) ────────────────
+
+@router.get("/fault_campaign/sai/history/")
+async def list_sai_history(current_user: dict = Depends(get_current_user)):
+    try:
+        return {"campaigns": get_campaigns_summary()}
+    except Exception as e:
+        print(f"❌ Error listando histórico SAI: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error listando histórico SAI: {str(e)}")
+
+
+@router.get("/fault_campaign/sai/history/{campaign_id}/faults")
+async def get_sai_history_faults(
+    campaign_id: str, current_user: dict = Depends(get_current_user)
+):
+    try:
+        faults = get_campaign_faults(campaign_id)
+        if not faults:
+            raise HTTPException(status_code=404, detail=f"Campaña no encontrada: {campaign_id}")
+        return {"campaign_id": campaign_id, "faults": faults}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error obteniendo fallos de campaña: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error obteniendo fallos: {str(e)}")
