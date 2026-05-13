@@ -68,4 +68,5 @@ layer_outputs/
 images/
 
 
-
+#base de datos 
+campaign_results.db

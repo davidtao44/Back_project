@@ -16,6 +16,7 @@ from app.services.fault_campaign_service import (
     start_weight_fault_campaign_job,
 )
 from app.services.model_service import get_available_models_for_campaign
+from app.services.sai_heatmap_service import get_sai_heatmap_data
 from app.utils.campaign_store import get_campaign_faults, get_campaigns_summary
 
 router = APIRouter(tags=["fault-campaign"])
@@ -120,3 +121,13 @@ async def get_sai_history_faults(
     except Exception as e:
         print(f"❌ Error obteniendo fallos de campaña: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error obteniendo fallos: {str(e)}")
+
+
+@router.get("/fault_campaign/sai/heatmap/")
+async def get_sai_heatmap(current_user: dict = Depends(get_current_user)):
+    """Datos para los heatmaps 3D de SAI y MAI, agrupados por (layer, target_type)."""
+    try:
+        return get_sai_heatmap_data()
+    except Exception as e:
+        print(f"❌ Error obteniendo datos del heatmap SAI: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error obteniendo heatmap: {str(e)}")
