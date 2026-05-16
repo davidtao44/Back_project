@@ -5,7 +5,7 @@ load_dotenv()
 
 SECRET_KEY = "tu_clave_secreta_super_segura_cambiala_en_produccion"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 2880
 
 USERS_COLLECTION = "users"
 FIREBASE_API_KEY = os.getenv("FIREBASE_API_KEY")
