@@ -8,7 +8,7 @@ from fastapi import HTTPException, UploadFile
 from app.core.config import LAYER_OUTPUTS_DIR
 from app.schemas.fault import FaultInjectionConfig
 from app.utils.json_utils import sanitize_for_json
-from fault_injection.manual_inference import ManualInference
+from fault_injection.manual_inference import ManualInference, get_model_metadata
 
 
 def configure_fault_injection(fault_config: FaultInjectionConfig):
@@ -77,11 +77,13 @@ async def run_fault_injector_inference(
         print("ℹ️ DEBUG: No se recibió configuración de fallos")
 
     session_id = f"user_{current_user.get('uid', 'anonymous')}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
+    model_meta = get_model_metadata(model_path)
     manual_inference = ManualInference(
         model_path,
         output_dir=LAYER_OUTPUTS_DIR,
         session_id=session_id,
         fault_config=fault_config_dict,
+        normalize=model_meta.get("normalize", False),
     )
 
     results = manual_inference.perform_manual_inference(image_data)

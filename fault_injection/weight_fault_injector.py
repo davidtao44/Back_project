@@ -44,7 +44,7 @@ class WeightFaultInjector:
         print("🔧 DEBUG WeightFaultInjector: Haciendo backup de pesos originales")
         
         for i, layer in enumerate(model.layers):
-            layer_name = f"{layer.__class__.__name__.lower()}_{i+1}"
+            layer_name = layer.name  # nombre real de Keras (fuente única de verdad)
             
             if hasattr(layer, 'get_weights') and layer.get_weights():
                 weights = layer.get_weights()
@@ -56,7 +56,7 @@ class WeightFaultInjector:
         print("🔧 DEBUG WeightFaultInjector: Restaurando pesos originales")
         
         for i, layer in enumerate(model.layers):
-            layer_name = f"{layer.__class__.__name__.lower()}_{i+1}"
+            layer_name = layer.name  # nombre real de Keras (fuente única de verdad)
             
             if layer_name in self.original_weights:
                 layer.set_weights(self.original_weights[layer_name])
@@ -125,7 +125,7 @@ class WeightFaultInjector:
         injected_faults = []
         
         for i, layer in enumerate(model.layers):
-            layer_name = f"{layer.__class__.__name__.lower()}_{i+1}"
+            layer_name = layer.name  # nombre real de Keras (fuente única de verdad)
             
             if layer_name not in self.fault_config:
                 continue

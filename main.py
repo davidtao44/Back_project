@@ -1,12 +1,31 @@
-import os
+# El bootstrap de CUDA debe ejecutarse ANTES de importar cualquier cosa que
+# cargue TensorFlow. Configura LD_LIBRARY_PATH y re-lanza el proceso una vez.
+from app.core.cuda_bootstrap import ensure_cuda_libpath
 
-import uvicorn
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+ensure_cuda_libpath()
 
-from app.core.firebase import initialize_firestore
-from app.routes import auth, fault_campaign, fault_injection, models, sessions, vhdl
+import os  # noqa: E402
+
+import uvicorn  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+from app.core.firebase import initialize_firestore  # noqa: E402
+from app.core.gpu import configure_gpu  # noqa: E402
+from app.routes import (
+    auth,
+    fault_campaign,
+    fault_injection,
+    hls_synthesis,
+    models,
+    sessions,
+    training,
+    vhdl,
+)
 from app.services.auth_service import initialize_default_users
+
+# Configurar la GPU antes de cargar/entrenar cualquier modelo.
+configure_gpu()
 
 app = FastAPI()
 
@@ -38,6 +57,8 @@ app.include_router(sessions.router)
 app.include_router(vhdl.router)
 app.include_router(fault_injection.router)
 app.include_router(fault_campaign.router)
+app.include_router(hls_synthesis.router)
+app.include_router(training.router)
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ from app.schemas.fault import (
 from app.services.sai_service import compute_sai_from_runs
 from app.utils.campaign_store import save_sai_campaign
 from app.utils.json_utils import sanitize_for_json
-from fault_injection.manual_inference import ManualInference
+from fault_injection.manual_inference import ManualInference, get_model_metadata
 from fault_injection.weight_fault_injector import WeightFaultInjector
 
 # ── Job store (in-memory) ─────────────────────────────────────────────────────
@@ -73,10 +73,25 @@ class FaultCampaign:
         self.model = tf.keras.models.load_model(model_path)
         print(f"✅ Modelo cargado: {model_path}")
 
+        # Derivar la forma de entrada del modelo (funciona con cualquier CNN)
+        input_shape = self.model.input_shape
+        if isinstance(input_shape, list):
+            input_shape = input_shape[0]
+        self.input_h, self.input_w, self.input_c = (
+            input_shape[1],
+            input_shape[2],
+            input_shape[3],
+        )
+        self._pil_mode = "L" if self.input_c == 1 else "RGB"
+        print(f"📐 Entrada del modelo: {self.input_h}x{self.input_w}x{self.input_c}")
+
         self.images, self.labels = self._load_dataset()
         print(f"📊 Dataset cargado: {len(self.images)} imágenes")
 
-        self.manual_inference = ManualInference(model_instance=self.model)
+        model_meta = get_model_metadata(model_path)
+        self.manual_inference = ManualInference(
+            model_instance=self.model, normalize=model_meta.get("normalize", False)
+        )
         self.weight_fault_injector = WeightFaultInjector()
 
         self.results = {
@@ -106,8 +121,8 @@ class FaultCampaign:
                     if filename.lower().endswith((".png", ".jpg", ".jpeg")):
                         try:
                             image_path = os.path.join(digit_path, filename)
-                            img = PILImage.open(image_path).convert("L")
-                            img = img.resize((28, 28))
+                            img = PILImage.open(image_path).convert(self._pil_mode)
+                            img = img.resize((self.input_w, self.input_h))
                             img_array = np.array(img) / 255.0
 
                             images.append(img_array)
@@ -137,10 +152,10 @@ class FaultCampaign:
         return x_test, y_test
 
     def _convert_image_to_bytes(self, image: np.ndarray) -> bytes:
-        if len(image.shape) == 2:
-            image = np.expand_dims(image, axis=-1)
-
-        image_pil = PILImage.fromarray((image.squeeze() * 255).astype(np.uint8), mode="L")
+        arr = np.array(image).squeeze()
+        # Modo de color según la dimensionalidad de la imagen
+        mode = "RGB" if arr.ndim == 3 and arr.shape[-1] == 3 else "L"
+        image_pil = PILImage.fromarray((arr * 255).astype(np.uint8), mode=mode)
 
         img_byte_arr = io.BytesIO()
         image_pil.save(img_byte_arr, format="PNG")

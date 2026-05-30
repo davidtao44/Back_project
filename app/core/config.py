@@ -18,3 +18,4 @@ MODEL_WEIGHTS_OUTPUTS_DIR = os.path.join(BASE_DIR, "model_weights_outputs")
 
 VHDL_FILE_PATH = "/home/davidgonzalez/Documentos/David_2025/4_CONV1_SAB_STUCKAT_DEC_RAM_TB/CONV1_SAB_STUCKAT_DEC_RAM.srcs/sources_1/new/CONV1_SAB_STUCK_DECOS.vhd"
 VHDL_SIM_DIR = "/home/davidgonzalez/Documentos/David_2025/4_CONV1_SAB_STUCKAT_DEC_RAM_TB/CONV1_SAB_STUCKAT_DEC_RAM.sim/sim_1/behav/xsim"
+HLS_OUTPUTS_DIR = os.path.join(BASE_DIR, "hls_outputs")

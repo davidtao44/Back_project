@@ -7,6 +7,9 @@ from app.services.model_service import (
     delete_models as delete_models_service,
 )
 from app.services.model_service import (
+    inspect_model_layers as inspect_model_layers_service,
+)
+from app.services.model_service import (
     list_models as list_models_service,
 )
 from app.services.model_service import (
@@ -33,6 +36,19 @@ def list_models(current_user: dict = Depends(get_current_user)):
     """Endpoint legacy para compatibilidad."""
     try:
         return list_models_service()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/models/layers/")
+def get_model_layers(
+    model_path: str, current_user: dict = Depends(get_current_user)
+):
+    """Inspecciona las capas reales de un modelo (nombres, tipos, formas)."""
+    try:
+        return inspect_model_layers_service(model_path)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

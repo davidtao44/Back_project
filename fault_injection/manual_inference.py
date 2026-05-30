@@ -4,6 +4,7 @@ from scipy.signal import correlate
 import pandas as pd
 import os
 import io
+import json
 from PIL import Image
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Any
@@ -13,13 +14,33 @@ import time
 from .bitflip_injector import BitflipFaultInjector
 from .weight_fault_injector import WeightFaultInjector
 
+def get_model_metadata(model_path: str) -> Dict[str, Any]:
+    """
+    Leer metadatos opcionales de un modelo desde un sidecar <model_path>.meta.json.
+
+    Permite declarar, por modelo, si su entrada debe normalizarse a [0, 1]
+    (campo "normalize"). Por defecto no se normaliza, conservando el
+    comportamiento histórico.
+    """
+    meta = {"normalize": False}
+    if model_path:
+        meta_path = f"{model_path}.meta.json"
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path) as f:
+                    meta.update(json.load(f))
+            except Exception as e:
+                print(f"⚠️ No se pudo leer metadatos del modelo ({meta_path}): {e}")
+    return meta
+
+
 class ManualInference:
     """
     Clase para realizar inferencia manual capa por capa en LeNet-5
     y generar archivos Excel e imágenes de cada capa.
     """
     
-    def __init__(self, model_path: str = None, output_dir: str = "layer_outputs", session_id: str = None, fault_config: Dict[str, Any] = None, model_instance: tf.keras.Model = None):
+    def __init__(self, model_path: str = None, output_dir: str = "layer_outputs", session_id: str = None, fault_config: Dict[str, Any] = None, model_instance: tf.keras.Model = None, normalize: bool = False):
         # Usar instancia del modelo si se proporciona, sino cargar desde ruta
         if model_instance is not None:
             self.model = model_instance
@@ -54,6 +75,10 @@ class ManualInference:
         else:
             print("ℹ️ DEBUG ManualInference: No se proporcionó configuración de fallos")
              
+        # Normalización de entrada (0-1 en vez de 0-255). Por defecto se respeta
+        # el comportamiento histórico (sin normalizar) para no alterar LeNet-5.
+        self.normalize = normalize
+
         # Inicializar variables de estado
         self.layer_outputs = {}
         self.create_output_directory()
@@ -171,14 +196,18 @@ class ManualInference:
     
     def get_fault_summary(self) -> Dict[str, Any]:
         """Obtener resumen de fallos inyectados en esta inferencia."""
+        # Considerar tanto la estructura nueva (activation_fault_enabled) como
+        # la legacy (fault_enabled).
+        activation_enabled = getattr(self, 'activation_fault_enabled', False) or getattr(self, 'fault_enabled', False)
+
         summary = {
-            'activation_fault_injection_enabled': self.fault_enabled,
+            'activation_fault_injection_enabled': activation_enabled,
             'weight_fault_injection_enabled': self.weight_fault_enabled,
             'session_id': self.session_id
         }
-        
+
         # Resumen de fallos en activaciones
-        if self.fault_enabled:
+        if activation_enabled:
             activation_summary = self.fault_injector.get_fault_summary()
             summary['activation_faults'] = activation_summary
         else:
@@ -219,7 +248,7 @@ class ManualInference:
             
         # Comparar pesos actuales con originales
         for i, layer in enumerate(self.model.layers):
-            layer_name = f"{layer.__class__.__name__.lower()}_{i+1}"
+            layer_name = layer.name  # nombre real de Keras (fuente única de verdad)
             
             if not hasattr(layer, 'get_weights') or not layer.get_weights():
                 continue
@@ -286,22 +315,39 @@ class ManualInference:
         return diagnosis
 
     def preprocess_image(self, image_data: bytes) -> np.ndarray:
-        """Preprocesar imagen para LeNet-5"""
+        """
+        Preprocesar una imagen adaptándose a la entrada del modelo.
+
+        El tamaño y el número de canales se derivan de model.input_shape, por lo
+        que funciona con cualquier CNN (32x32x1, 224x224x3, etc.).
+        """
+        # Derivar forma de entrada esperada: (None, H, W, C)
+        input_shape = self.model.input_shape
+        if isinstance(input_shape, list):
+            input_shape = input_shape[0]
+        height, width, channels = input_shape[1], input_shape[2], input_shape[3]
+
         # Convertir bytes a imagen PIL
         image = Image.open(io.BytesIO(image_data))
-        
-        # Convertir a escala de grises
-        if image.mode != 'L':
-            image = image.convert('L')
-        
-        # Redimensionar a 32x32
-        image = image.resize((32, 32))
-        
+
+        # Modo de color según los canales del modelo
+        target_mode = 'L' if channels == 1 else 'RGB'
+        if image.mode != target_mode:
+            image = image.convert(target_mode)
+
+        # Redimensionar (PIL usa (ancho, alto))
+        image = image.resize((width, height))
+
         # Convertir a numpy array
-        imagen = np.array(image)
-        imagen = np.expand_dims(imagen, axis=-1)  # Agregar dimensión del canal
-        imagen = np.expand_dims(imagen, axis=0)   # Agregar dimensión del batch
-        
+        imagen = np.array(image).astype('float32')
+        if imagen.ndim == 2:  # escala de grises -> agregar canal
+            imagen = np.expand_dims(imagen, axis=-1)
+
+        # Normalización opcional (metadato del modelo)
+        if self.normalize:
+            imagen = imagen / 255.0
+
+        imagen = np.expand_dims(imagen, axis=0)  # Agregar dimensión del batch
         return imagen
     
     def save_feature_maps_to_excel(self, feature_maps: np.ndarray, layer_name: str, max_channels: int = None):
@@ -484,167 +530,106 @@ class ManualInference:
         
         return result
     
+    def _is_softmax_layer(self, layer) -> bool:
+        """Detectar si una capa aplica activación softmax."""
+        act = getattr(layer, 'activation', None)
+        return act is not None and getattr(act, '__name__', '') == 'softmax'
+
+    def _save_layer_output(self, output: np.ndarray, layer_name: str, results: Dict[str, Any]):
+        """Guardar la salida de una capa como Excel/imágenes según su dimensionalidad."""
+        results["layer_outputs"][layer_name] = tuple(int(s) for s in output.shape)
+        if output.ndim == 3:
+            excel_file = self.save_feature_maps_to_excel(output, layer_name)
+            image_files = self.save_feature_maps_as_images(output, layer_name)
+            if excel_file:
+                results["excel_files"].append(excel_file)
+            results["image_files"].extend(image_files)
+        elif output.ndim == 1:
+            excel_file = self.save_feature_maps_to_excel(output, layer_name)
+            if excel_file:
+                results["excel_files"].append(excel_file)
+
     def perform_manual_inference(self, image_data: bytes) -> Dict[str, Any]:
-        """Realizar inferencia manual completa"""
+        """
+        Realizar inferencia capa por capa sobre cualquier CNN secuencial de Keras.
+
+        Recorre model.layers calculando cada capa con Keras y deteniéndose en cada
+        una para inyectar fallos en sus activaciones. Los fallos en pesos ya fueron
+        aplicados sobre el modelo antes de llamar a este método.
+        """
         print(f"Iniciando inferencia manual. Directorio de salida: {self.output_dir}")
-        
-        # Preprocesar imagen
+
+        # Preprocesar imagen y preparar tensor de entrada
         imagen = self.preprocess_image(image_data)
-        imagen_procesada = imagen[0, :, :, 0]  # (32, 32)
-        
+        x = tf.convert_to_tensor(imagen, dtype=tf.float32)
+
         results = {
             "layer_outputs": {},
             "excel_files": [],
             "image_files": [],
-            "final_prediction": {}
+            "final_prediction": {},
         }
-        
-        # ==================== PRIMERA CAPA CONVOLUCIONAL ====================
-        conv_layer1 = self.model.layers[0]
-        filters1, biases1 = conv_layer1.get_weights()
-        
-        feature_maps1 = self.conv2d_manual(imagen_procesada, filters1, biases1)
-        feature_maps1 = self.relu_activation(feature_maps1)
-        
-        # Aplicar inyección de fallos si está habilitada
-        feature_maps1 = self.apply_fault_injection(feature_maps1, "conv2d_1")
-        
-        # Guardar resultados
-        excel_file1 = self.save_feature_maps_to_excel(feature_maps1, "conv2d_1")
-        image_files1 = self.save_feature_maps_as_images(feature_maps1, "conv2d_1")
-        
-        results["layer_outputs"]["conv2d_1"] = tuple(int(x) for x in feature_maps1.shape)
-        results["excel_files"].append(excel_file1)
-        results["image_files"].extend(image_files1)
-        
-        # ==================== PRIMER MAXPOOLING ====================
-        pool_layer1 = self.model.layers[1]
-        pool_size1 = pool_layer1.pool_size
-        strides1 = pool_layer1.strides
-        
-        pooled_maps1 = self.maxpool2d_manual(feature_maps1, pool_size1, strides1)
-        
-        # Aplicar inyección de fallos si está habilitada
-        pooled_maps1 = self.apply_fault_injection(pooled_maps1, "maxpooling2d_1")
-        
-        # Guardar resultados
-        excel_file_pool1 = self.save_feature_maps_to_excel(pooled_maps1, "maxpooling2d_1")
-        image_files_pool1 = self.save_feature_maps_as_images(pooled_maps1, "maxpooling2d_1")
-        
-        results["layer_outputs"]["maxpooling2d_1"] = tuple(int(x) for x in pooled_maps1.shape)
-        results["excel_files"].append(excel_file_pool1)
-        results["image_files"].extend(image_files_pool1)
-        
-        # ==================== SEGUNDA CAPA CONVOLUCIONAL ====================
-        conv_layer2 = self.model.layers[2]
-        filters2, biases2 = conv_layer2.get_weights()
-        
-        feature_maps2 = self.conv2d_manual(pooled_maps1, filters2, biases2)
-        feature_maps2 = self.relu_activation(feature_maps2)
-        
-        # Aplicar inyección de fallos si está habilitada
-        feature_maps2 = self.apply_fault_injection(feature_maps2, "conv2d_2")
-        
-        # Guardar resultados
-        excel_file2 = self.save_feature_maps_to_excel(feature_maps2, "conv2d_2")
-        image_files2 = self.save_feature_maps_as_images(feature_maps2, "conv2d_2")
-        
-        results["layer_outputs"]["conv2d_2"] = tuple(int(x) for x in feature_maps2.shape)
-        results["excel_files"].append(excel_file2)
-        results["image_files"].extend(image_files2)
-        
-        # ==================== SEGUNDO MAXPOOLING ====================
-        pool_layer2 = self.model.layers[3]
-        pool_size2 = pool_layer2.pool_size
-        strides2 = pool_layer2.strides
-        
-        pooled_maps2 = self.maxpool2d_manual(feature_maps2, pool_size2, strides2)
-        
-        # Aplicar inyección de fallos si está habilitada
-        pooled_maps2 = self.apply_fault_injection(pooled_maps2, "maxpooling2d_2")
-        
-        # Guardar resultados
-        excel_file_pool2 = self.save_feature_maps_to_excel(pooled_maps2, "maxpooling2d_2")
-        image_files_pool2 = self.save_feature_maps_as_images(pooled_maps2, "maxpooling2d_2")
-        
-        results["layer_outputs"]["maxpooling2d_2"] = tuple(int(x) for x in pooled_maps2.shape)
-        results["excel_files"].append(excel_file_pool2)
-        results["image_files"].extend(image_files_pool2)
-        
-        # ==================== FLATTEN ====================
-        flatten_output = pooled_maps2.flatten()
-        
-        # Aplicar inyección de fallos si está habilitada
-        flatten_output = self.apply_fault_injection(flatten_output, "flatten")
-        
-        # Guardar resultados
-        excel_file_flatten = self.save_feature_maps_to_excel(flatten_output, "flatten")
-        results["layer_outputs"]["flatten"] = tuple(int(x) for x in flatten_output.shape)
-        results["excel_files"].append(excel_file_flatten)
-        
-        # ==================== PRIMERA CAPA DENSA (120 neuronas) ====================
-        dense_layer1 = self.model.layers[5]
-        weights1, biases1_dense = dense_layer1.get_weights()
-        
-        dense_output1 = self.dense_manual(flatten_output, weights1, biases1_dense)
-        dense_output1 = self.relu_activation(dense_output1)
-        
-        # Aplicar inyección de fallos si está habilitada
-        dense_output1 = self.apply_fault_injection(dense_output1, "dense_1")
-        
-        # Guardar resultados
-        excel_file_dense1 = self.save_feature_maps_to_excel(dense_output1, "dense_1")
-        results["layer_outputs"]["dense_1"] = tuple(int(x) for x in dense_output1.shape)
-        results["excel_files"].append(excel_file_dense1)
-        
-        # ==================== SEGUNDA CAPA DENSA (84 neuronas) ====================
-        dense_layer2 = self.model.layers[6]
-        weights2, biases2_dense = dense_layer2.get_weights()
-        
-        dense_output2 = self.dense_manual(dense_output1, weights2, biases2_dense)
-        dense_output2 = self.relu_activation(dense_output2)
-        
-        # Aplicar inyección de fallos si está habilitada
-        dense_output2 = self.apply_fault_injection(dense_output2, "dense_2")
-        
-        # Guardar resultados
-        excel_file_dense2 = self.save_feature_maps_to_excel(dense_output2, "dense_2")
-        results["layer_outputs"]["dense_2"] = tuple(int(x) for x in dense_output2.shape)
-        results["excel_files"].append(excel_file_dense2)
-        
-        # ==================== CAPA FINAL (10 neuronas + Softmax) ====================
-        dense_layer3 = self.model.layers[7]
-        weights3, biases3_dense = dense_layer3.get_weights()
-        
-        dense_output3 = self.dense_manual(dense_output2, weights3, biases3_dense)
-        
-        # Aplicar inyección de fallos si está habilitada (antes del softmax)
-        dense_output3 = self.apply_fault_injection(dense_output3, "dense_3")
-        
-        softmax_output = self.softmax_activation(dense_output3)
-        
-        # Guardar resultados
-        excel_file_softmax = self.save_feature_maps_to_excel(softmax_output, "softmax")
-        results["layer_outputs"]["softmax"] = tuple(int(x) for x in softmax_output.shape)
-        results["excel_files"].append(excel_file_softmax)
-        
-        # Guardar dense_output3 (pre-softmax) para análisis de propagación
-        results["dense_output3"] = [float(x) for x in dense_output3]
-        
-        # ==================== PREDICCIÓN FINAL ====================
-        # Detectar errores numéricos en la salida de softmax
-        softmax_errors = self.detect_numerical_errors(softmax_output, "predicción final")
-        
-        # Preservar probabilidades originales para mostrar en el frontend
-        original_probabilities = [float(prob) for prob in softmax_output]
-        
-        # Intentar calcular predicción incluso con errores
+
+        logits = None  # salida pre-softmax (para análisis de propagación)
+
+        for layer in self.model.layers:
+            layer_name = layer.name
+
+            if self._is_softmax_layer(layer):
+                # Calcular la capa SIN softmax para inyectar fallos en los logits,
+                # conservando el flujo original (fallos antes del softmax).
+                saved_activation = layer.activation
+                layer.activation = tf.keras.activations.linear
+                try:
+                    pre_softmax = layer(x).numpy()[0]
+                finally:
+                    layer.activation = saved_activation
+
+                pre_softmax = self.apply_fault_injection(pre_softmax, layer_name)
+                logits = np.array(pre_softmax, dtype=np.float64)
+                output = self.softmax_activation(pre_softmax)
+            else:
+                output = layer(x).numpy()[0]
+                output = self.apply_fault_injection(output, layer_name)
+
+            # Re-empaquetar como tensor con dimensión de batch para la capa siguiente
+            x = tf.convert_to_tensor(output[np.newaxis, ...], dtype=tf.float32)
+
+            self._save_layer_output(output, layer_name, results)
+
+        # Salida final de la red
+        final_output = np.array(x.numpy()[0])
+        if logits is None:
+            logits = final_output.astype(np.float64)
+
+        # dense_output3: alias histórico para los logits pre-softmax (lo usa el
+        # servicio de campañas para detectar cambios de propagación).
+        results["dense_output3"] = [float(v) for v in logits]
+
+        # Construir la predicción final (argmax + detección de NaN/Inf)
+        results["final_prediction"] = self._build_prediction(final_output)
+
+        # Filtrar archivos None de las listas
+        results["excel_files"] = [f for f in results["excel_files"] if f is not None]
+        results["image_files"] = [f for f in results["image_files"] if f is not None]
+
+        # Agregar información de inyección de fallos
+        results["fault_injection"] = self.get_fault_summary()
+        results["session_id"] = self.session_id
+
+        print(f"Inferencia completada. Archivos Excel: {len(results['excel_files'])}, Imágenes: {len(results['image_files'])}")
+        return results
+
+    def _build_prediction(self, output: np.ndarray) -> Dict[str, Any]:
+        """Construir el diccionario de predicción final con manejo de errores numéricos."""
+        softmax_errors = self.detect_numerical_errors(output, "predicción final")
+        original_probabilities = [float(p) for p in output]
+
         try:
-            predicted_class = int(np.argmax(softmax_output)) if np.any(np.isfinite(softmax_output)) else -1
-            confidence = float(np.max(softmax_output[np.isfinite(softmax_output)])) if np.any(np.isfinite(softmax_output)) else 0.0
-            # Para JSON serialization, mantener valores originales pero marcar los problemáticos
+            predicted_class = int(np.argmax(output)) if np.any(np.isfinite(output)) else -1
+            confidence = float(np.max(output[np.isfinite(output)])) if np.any(np.isfinite(output)) else 0.0
             all_probabilities = []
-            for prob in softmax_output:
+            for prob in output:
                 if np.isfinite(prob):
                     all_probabilities.append(float(prob))
                 elif np.isnan(prob):
@@ -659,14 +644,12 @@ class ManualInference:
             print(f"❌ Error al calcular predicción: {str(e)}")
             predicted_class = -1
             confidence = 0.0
-            all_probabilities = [0.0] * len(softmax_output)
-            original_probabilities = [0.0] * len(softmax_output)
-        
-        # Determinar si hay errores críticos que impiden la serialización JSON
+            all_probabilities = [0.0] * len(output)
+            original_probabilities = [0.0] * len(output)
+
         has_critical_errors = softmax_errors["has_nan"] or softmax_errors["has_inf"]
-        
+
         if has_critical_errors:
-            # Crear respuesta de error informativa
             error_info = {
                 "error_type": "numerical_overflow_underflow",
                 "error_details": {
@@ -676,63 +659,30 @@ class ManualInference:
                     "overflow_count": softmax_errors["overflow_count"],
                     "underflow_count": softmax_errors["underflow_count"],
                     "nan_count": softmax_errors["nan_count"],
-                    "description": "La inyección de fallos ha causado valores numéricos fuera del rango IEEE 754"
+                    "description": "La inyección de fallos ha causado valores numéricos fuera del rango IEEE 754",
                 },
                 "attempted_prediction": {
                     "predicted_class": predicted_class,
                     "confidence": confidence,
-                    "probabilities_with_errors": softmax_errors["nan_count"] + softmax_errors["overflow_count"] + softmax_errors["underflow_count"]
+                    "probabilities_with_errors": softmax_errors["nan_count"] + softmax_errors["overflow_count"] + softmax_errors["underflow_count"],
                 },
-                "original_probabilities": original_probabilities
+                "original_probabilities": original_probabilities,
             }
-            
-            results["final_prediction"] = {
+            return {
                 "success": False,
                 "error": error_info,
                 "predicted_class": predicted_class,
                 "confidence": confidence,
-                "all_probabilities": all_probabilities
-            }
-        else:
-            results["final_prediction"] = {
-                "success": True,
-                "predicted_class": predicted_class,
-                "confidence": confidence,
                 "all_probabilities": all_probabilities,
-                "original_probabilities": original_probabilities
             }
-        
-        # Filtrar archivos None de las listas
-        results["excel_files"] = [f for f in results["excel_files"] if f is not None]
-        results["image_files"] = [f for f in results["image_files"] if f is not None]
-        
-        # Ordenar archivos por orden de capas
-        def get_layer_order(filename):
-            layer_order = {
-                'conv2d_1': 1,
-                'maxpooling2d_1': 2,
-                'conv2d_2': 3,
-                'maxpooling2d_2': 4,
-                'flatten': 5,
-                'dense_1': 6,
-                'dense_2': 7,
-                'softmax': 8
-            }
-            for layer_name, order in layer_order.items():
-                if layer_name in filename:
-                    return order
-            return 999  # Para archivos no reconocidos
-        
-        results["excel_files"].sort(key=lambda x: get_layer_order(os.path.basename(x)))
-        results["image_files"].sort(key=lambda x: (get_layer_order(os.path.basename(x)), os.path.basename(x)))
-        
-        # Agregar información de inyección de fallos
-        results["fault_injection"] = self.get_fault_summary()
-        results["session_id"] = self.session_id
-        
-        print(f"Inferencia completada. Archivos Excel: {len(results['excel_files'])}, Imágenes: {len(results['image_files'])}")
-        
-        return results
+
+        return {
+            "success": True,
+            "predicted_class": predicted_class,
+            "confidence": confidence,
+            "all_probabilities": all_probabilities,
+            "original_probabilities": original_probabilities,
+        }
 
     def save_difference_maps(self, feature_maps: np.ndarray, layer_name: str, golden_maps: np.ndarray = None) -> List[str]:
         """

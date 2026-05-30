@@ -168,17 +168,11 @@ class BitflipFaultInjector:
             # Obtener forma de las activaciones
             shape = activations.shape
             
-            # Generar posición aleatoria
-            if len(shape) == 1:  # Vector 1D (capas densas)
-                pos = (random.randint(0, shape[0] - 1),)
-            elif len(shape) == 3:  # 3D (mapas de características)
-                pos = (
-                    random.randint(0, shape[0] - 1),
-                    random.randint(0, shape[1] - 1),
-                    random.randint(0, shape[2] - 1)
-                )
-            else:
+            # Generar posición aleatoria para cualquier dimensionalidad
+            # (1D denso, 2D, 3D mapas de características, 4D, etc.)
+            if len(shape) == 0:
                 return None
+            pos = tuple(random.randint(0, dim - 1) for dim in shape)
                 
             # Obtener configuración de la capa
             config = self.fault_config.get(layer_name, {})
@@ -206,7 +200,7 @@ class BitflipFaultInjector:
             
             return {
                 'layer_name': layer_name,
-                'position': tuple(int(x) for x in random_position),
+                'position': tuple(int(x) for x in pos),
                 'bit_position': int(bit_position),
                 'original_value': float(original_value),
                 'modified_value': float(modified_value),

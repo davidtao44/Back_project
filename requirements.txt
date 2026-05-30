@@ -21,3 +21,4 @@ scipy
 scikit-learn
 pandas
 matplotlib
+hls4ml
